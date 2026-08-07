@@ -1557,10 +1557,8 @@ def parse_employer_requirement(
             model=GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
-                response_mime_type=(
-                    "application/json"
-                ),
-                temperature=0,
+    response_mime_type="application/json",
+)
             )
         )
     )
