@@ -917,15 +917,7 @@ employer_request = st.text_area(
 )
 
 
-button_col1,
-button_col2 = (
-    st.columns(
-        [
-            4,
-            1,
-        ]
-    )
-)
+button_col1, button_col2 = st.columns([4, 1])
 
 
 with button_col1:
