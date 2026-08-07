@@ -1,19 +1,6 @@
 # ============================================================
-# Teacher Matching System V1
+# Teacher Matching System V1.1
 # streamlit_app.py
-#
-# 功能：
-# 1. Streamlit 网页
-# 2. 输入雇主自然语言需求
-# 3. Gemini 自动解析需求
-# 4. Baserow 自动读取老师数据库
-# 5. Matching Engine 自动评分
-# 6. 显示 Top Candidates
-# ============================================================
-
-
-# ============================================================
-# 1. Imports
 # ============================================================
 
 from typing import Any, Dict, List
@@ -43,25 +30,19 @@ from matcher import (
 
 
 # ============================================================
-# 2. Streamlit Page Configuration
+# Page
 # ============================================================
 
 st.set_page_config(
     page_title="Teacher Matching System",
     page_icon="🎓",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-
-# ============================================================
-# 3. Custom CSS
-# ============================================================
 
 st.markdown(
     """
     <style>
-
     .block-container {
         max-width: 1450px;
         padding-top: 2rem;
@@ -71,32 +52,19 @@ st.markdown(
     .main-title {
         font-size: 42px;
         font-weight: 750;
-        margin-bottom: 5px;
     }
 
     .main-subtitle {
         color: #777777;
-        font-size: 16px;
-        margin-bottom: 32px;
+        margin-bottom: 30px;
     }
 
     .section-title {
         font-size: 25px;
         font-weight: 700;
-        margin-top: 14px;
+        margin-top: 15px;
         margin-bottom: 15px;
     }
-
-    .teacher-name {
-        font-size: 23px;
-        font-weight: 700;
-    }
-
-    .small-muted {
-        font-size: 13px;
-        color: #777777;
-    }
-
     </style>
     """,
     unsafe_allow_html=True,
@@ -104,137 +72,135 @@ st.markdown(
 
 
 # ============================================================
-# 4. Formatting Helpers
+# Helpers
 # ============================================================
 
-def format_number(value: Any) -> str:
-    """
-    数字显示格式。
-    """
+def format_number(
+    value: Any
+):
 
     if value is None:
         return "未填写"
 
     try:
+
         number = float(value)
 
         if number.is_integer():
-            return str(int(number))
+            return str(
+                int(number)
+            )
 
-        return str(round(number, 2))
+        return str(
+            round(number, 2)
+        )
 
-    except (TypeError, ValueError):
+    except (
+        TypeError,
+        ValueError,
+    ):
+
         return str(value)
 
 
-def format_list(values: Any) -> str:
-    """
-    List 转换成文字。
-    """
+def format_list(
+    value: Any
+):
 
-    if values is None:
+    if value is None:
         return "未填写"
 
-    if values == "":
-        return "未填写"
+    if isinstance(value, list):
 
-    if isinstance(values, list):
-
-        if not values:
+        if not value:
             return "未填写"
 
         return ", ".join(
             str(item)
-            for item in values
+            for item in value
         )
 
-    return str(values)
+    return str(value)
 
 
-def yes_no(value: Any) -> str:
-    """
-    Boolean 中文显示。
-    """
+def yes_no(
+    value: Any
+):
 
-    return "是" if bool(value) else "否"
+    return (
+        "是"
+        if bool(value)
+        else "否"
+    )
 
 
 def format_location(
-    teacher: Dict[str, Any]
-) -> str:
-    """
-    当前所在地，仅展示，不参与 Working City 匹配。
-    """
+    teacher,
+):
 
     city = teacher.get(
         "Current City"
-    ) or ""
+    )
 
     country = teacher.get(
         "Current Country"
-    ) or ""
+    )
 
-    parts = []
+    values = []
 
     if city:
-        parts.append(str(city))
+        values.append(
+            str(city)
+        )
 
     if country:
-        parts.append(str(country))
+        values.append(
+            str(country)
+        )
 
-    if not parts:
+    if not values:
         return "未填写"
 
-    return ", ".join(parts)
+    return ", ".join(values)
 
 
 def format_age_range(
-    teacher: Dict[str, Any]
-) -> str:
-    """
-    老师可接受孩子年龄。
-    """
+    teacher,
+):
 
-    minimum_age = teacher.get(
+    minimum = teacher.get(
         "Minimum Child Age"
     )
 
-    maximum_age = teacher.get(
+    maximum = teacher.get(
         "Maximum Child Age"
     )
 
     if (
-        minimum_age is None
-        and maximum_age is None
+        minimum is None
+        or maximum is None
     ):
+
         return "未填写"
 
-    if minimum_age is None:
-        return (
-            f"≤ {format_number(maximum_age)} 岁"
-        )
-
-    if maximum_age is None:
-        return (
-            f"≥ {format_number(minimum_age)} 岁"
-        )
-
     return (
-        f"{format_number(minimum_age)}"
-        f"–"
-        f"{format_number(maximum_age)} 岁"
+        f"{format_number(minimum)}"
+        "–"
+        f"{format_number(maximum)} 岁"
     )
 
 
-def requirement_value_text(
-    value: Any
-) -> str:
-    """
-    AI Requirement 页面显示。
-    """
+def requirement_text(
+    value,
+):
 
     if isinstance(value, bool):
-        return "是" if value else "否"
+
+        return (
+            "是"
+            if value
+            else "否"
+        )
 
     if isinstance(value, list):
 
@@ -247,75 +213,13 @@ def requirement_value_text(
 
 
 # ============================================================
-# 5. Database Summary
-# ============================================================
-
-def build_database_summary(
-    teachers: List[Dict[str, Any]]
-) -> Dict[str, int]:
-    """
-    根据已经读取的老师列表计算数据库统计，
-    避免再次请求 Baserow。
-    """
-
-    total_teachers = len(teachers)
-
-    complete_age_range = 0
-    with_preferred_cities = 0
-    with_visa_countries = 0
-    teachers_with_warnings = 0
-
-    for teacher in teachers:
-
-        minimum_age = teacher.get(
-            "Minimum Child Age"
-        )
-
-        maximum_age = teacher.get(
-            "Maximum Child Age"
-        )
-
-        if (
-            minimum_age is not None
-            and maximum_age is not None
-        ):
-            complete_age_range += 1
-
-        if teacher.get(
-            "Preferred Cities"
-        ):
-            with_preferred_cities += 1
-
-        if teacher.get(
-            "Visa / Work Authorization Countries"
-        ):
-            with_visa_countries += 1
-
-        if teacher.get(
-            "_validation_warnings"
-        ):
-            teachers_with_warnings += 1
-
-    return {
-        "total_teachers": total_teachers,
-        "complete_age_range": complete_age_range,
-        "with_preferred_cities": with_preferred_cities,
-        "with_visa_countries": with_visa_countries,
-        "teachers_with_warnings": teachers_with_warnings,
-    }
-
-
-# ============================================================
-# 6. Requirement Display
+# Requirement Group
 # ============================================================
 
 def render_requirement_group(
-    title: str,
-    requirements: Dict[str, Any],
+    title,
+    requirements,
 ):
-    """
-    显示 Hard / Preferred Requirements。
-    """
 
     st.markdown(
         f"#### {title}"
@@ -324,92 +228,37 @@ def render_requirement_group(
     if not requirements:
 
         st.caption(
-            "没有识别到条件。"
+            "没有识别到条件"
         )
 
         return
 
-    for field, value in requirements.items():
-
-        label = get_field_label(
-            field
-        )
-
-        value_text = (
-            requirement_value_text(
-                value
-            )
-        )
+    for field, value in (
+        requirements.items()
+    ):
 
         st.write(
-            f"**{label}：** {value_text}"
+            f"**{get_field_label(field)}：** "
+            f"{requirement_text(value)}"
         )
 
 
 # ============================================================
-# 7. Teacher Card
+# Teacher Card
 # ============================================================
 
 def render_teacher_card(
-    rank: int,
-    result: Dict[str, Any],
+    rank,
+    result,
 ):
-    """
-    显示单个老师匹配结果。
-    """
 
-    teacher = result.get(
-        "teacher",
-        {}
-    )
-
-    name = (
-        result.get("name")
-        or "Unknown Teacher"
-    )
-
-    score = result.get(
-        "score",
-        0
-    )
-
-    eligible = result.get(
-        "eligible",
-        False
-    )
-
-    hard_matched = result.get(
-        "hard_matched",
-        []
-    )
-
-    hard_missing = result.get(
-        "hard_missing",
-        []
-    )
-
-    preferred_matched = result.get(
-        "preferred_matched",
-        []
-    )
-
-    preferred_missing = result.get(
-        "preferred_missing",
-        []
-    )
-
-    reasons = result.get(
-        "recommendation_reasons",
-        []
-    )
+    teacher = result[
+        "teacher"
+    ]
 
     with st.container(
         border=True
     ):
-
-        # ====================================================
-        # Header
-        # ====================================================
 
         header_left, header_right = st.columns(
             [4, 1]
@@ -418,10 +267,13 @@ def render_teacher_card(
         with header_left:
 
             st.markdown(
-                f"### {rank}. {name}"
+                f"### {rank}. "
+                f'{result["name"]}'
             )
 
-            if eligible:
+            if result[
+                "eligible"
+            ]:
 
                 st.success(
                     "✅ 符合全部硬条件"
@@ -437,18 +289,31 @@ def render_teacher_card(
 
             st.metric(
                 "匹配度",
-                f"{score}%",
+                f'{result["score"]}%'
             )
 
-        # ====================================================
-        # Basic Profile
-        # ====================================================
-
-        profile_col1, profile_col2, profile_col3 = st.columns(
+        col1, col2, col3 = st.columns(
             3
         )
 
-        with profile_col1:
+        with col1:
+
+            st.write(
+                "**年龄：**",
+                (
+                    format_number(
+                        teacher.get(
+                            "Age"
+                        )
+                    )
+                    + " 岁"
+                    if teacher.get(
+                        "Age"
+                    )
+                    is not None
+                    else "未填写"
+                ),
+            )
 
             st.write(
                 "**国籍：**",
@@ -482,7 +347,7 @@ def render_teacher_card(
                 or "未填写",
             )
 
-        with profile_col2:
+        with col2:
 
             st.write(
                 "**可接受工作城市：**",
@@ -501,15 +366,6 @@ def render_teacher_card(
             )
 
             st.write(
-                "**签证/合法工作国家：**",
-                format_list(
-                    teacher.get(
-                        "Visa / Work Authorization Countries"
-                    )
-                ),
-            )
-
-            st.write(
                 "**教学语言：**",
                 format_list(
                     teacher.get(
@@ -518,31 +374,40 @@ def render_teacher_card(
                 ),
             )
 
-        with profile_col3:
-
             st.write(
-                "**Subjects：**",
+                "**签证/工作许可：**",
                 format_list(
                     teacher.get(
-                        "Subjects"
+                        "Visa / Work Authorization Countries"
                     )
                 ),
             )
 
-            st.write(
-                "**Curriculum：**",
-                format_list(
-                    teacher.get(
-                        "Curriculum"
-                    )
-                ),
-            )
+        with col3:
 
             st.write(
-                "**Live-in：**",
+                "**住家：**",
                 yes_no(
                     teacher.get(
                         "Live-in"
+                    )
+                ),
+            )
+
+            st.write(
+                "**可以带睡/夜间照护：**",
+                yes_no(
+                    teacher.get(
+                        "Night Care"
+                    )
+                ),
+            )
+
+            st.write(
+                "**要求独立房间：**",
+                yes_no(
+                    teacher.get(
+                        "Private Room Required"
                     )
                 ),
             )
@@ -556,124 +421,140 @@ def render_teacher_card(
                 ),
             )
 
-        # ====================================================
-        # More Experience
-        # ====================================================
-
-        experience_col1, experience_col2, experience_col3 = st.columns(
-            3
+        st.write(
+            "**Subjects：**",
+            format_list(
+                teacher.get(
+                    "Subjects"
+                )
+            ),
         )
 
-        with experience_col1:
-
-            st.write(
-                "**SEN Experience：**",
-                yes_no(
-                    teacher.get(
-                        "SEN Experience"
-                    )
-                ),
-            )
-
-        with experience_col2:
-
-            st.write(
-                "**International School：**",
-                yes_no(
-                    teacher.get(
-                        "International School Experience"
-                    )
-                ),
-            )
-
-        with experience_col3:
-
-            st.write(
-                "**Private Tutoring：**",
-                yes_no(
-                    teacher.get(
-                        "Private Tutoring Experience"
-                    )
-                ),
-            )
+        st.write(
+            "**Curriculum：**",
+            format_list(
+                teacher.get(
+                    "Curriculum"
+                )
+            ),
+        )
 
         st.divider()
-
-        # ====================================================
-        # Matching Analysis
-        # ====================================================
 
         st.markdown(
             "#### 匹配分析"
         )
 
-        hard_matched_labels = [
+        hard_matched = [
             get_field_label(field)
-            for field in hard_matched
+            for field in result[
+                "hard_matched"
+            ]
         ]
 
-        hard_missing_labels = [
+        hard_missing = [
             get_field_label(field)
-            for field in hard_missing
+            for field in result[
+                "hard_missing"
+            ]
         ]
 
-        preferred_matched_labels = [
+        preferred_matched = [
             get_field_label(field)
-            for field in preferred_matched
+            for field in result[
+                "preferred_matched"
+            ]
         ]
 
-        preferred_missing_labels = [
+        preferred_missing = [
             get_field_label(field)
-            for field in preferred_missing
+            for field in result[
+                "preferred_missing"
+            ]
+        ]
+
+        reference_matched = [
+            get_field_label(field)
+            for field in result[
+                "reference_matched"
+            ]
+        ]
+
+        reference_missing = [
+            get_field_label(field)
+            for field in result[
+                "reference_missing"
+            ]
+        ]
+
+        reference_unknown = [
+            get_field_label(field)
+            for field in result[
+                "reference_unknown"
+            ]
         ]
 
         st.write(
             "✅ **硬条件满足：**",
-            (
-                ", ".join(
-                    hard_matched_labels
-                )
-                if hard_matched_labels
-                else "无"
-            ),
+            ", ".join(
+                hard_matched
+            )
+            or "无",
         )
 
         st.write(
             "❌ **硬条件缺失：**",
-            (
-                ", ".join(
-                    hard_missing_labels
-                )
-                if hard_missing_labels
-                else "无"
-            ),
+            ", ".join(
+                hard_missing
+            )
+            or "无",
         )
 
         st.write(
-            "⭐ **偏好条件满足：**",
-            (
-                ", ".join(
-                    preferred_matched_labels
-                )
-                if preferred_matched_labels
-                else "无"
-            ),
+            "⭐ **偏好满足：**",
+            ", ".join(
+                preferred_matched
+            )
+            or "无",
         )
 
         st.write(
-            "△ **偏好条件未满足：**",
-            (
-                ", ".join(
-                    preferred_missing_labels
-                )
-                if preferred_missing_labels
-                else "无"
-            ),
+            "△ **偏好未满足：**",
+            ", ".join(
+                preferred_missing
+            )
+            or "无",
         )
 
-        # ====================================================
-        # Recommendation Reasons
-        # ====================================================
+        st.write(
+            "ℹ️ **参考条件适配：**",
+            ", ".join(
+                reference_matched
+            )
+            or "无",
+        )
+
+        st.write(
+            "ℹ️ **参考条件不适配：**",
+            ", ".join(
+                reference_missing
+            )
+            or "无",
+        )
+
+        if reference_unknown:
+
+            st.write(
+                "ℹ️ **参考资料未知：**",
+                ", ".join(
+                    reference_unknown
+                ),
+            )
+
+        reasons = result.get(
+            "recommendation_reasons",
+            []
+        )
 
         if reasons:
 
@@ -687,98 +568,59 @@ def render_teacher_card(
                     f"• {reason}"
                 )
 
-        # ====================================================
-        # Desired Position
-        # ====================================================
-
-        desired_positions = teacher.get(
+        desired = teacher.get(
             "Desired Position"
         )
 
-        if desired_positions:
+        if desired:
 
             st.caption(
-                "Desired Position（仅展示，不参与匹配）："
-                +
-                format_list(
-                    desired_positions
-                )
+                "Desired Position "
+                "仅展示，不参与匹配："
+                f"{format_list(desired)}"
             )
-
-        # ====================================================
-        # Full Profile
-        # ====================================================
 
         with st.expander(
             "查看完整老师资料"
         ):
 
-            display_teacher = {}
-
-            for key, value in teacher.items():
-
-                if str(key).startswith("_"):
-                    continue
-
-                display_teacher[
+            clean_teacher = {
+                key: value
+                for key, value
+                in teacher.items()
+                if not str(
                     key
-                ] = value
+                ).startswith("_")
+            }
 
             st.json(
-                display_teacher
+                clean_teacher
             )
 
-        # ====================================================
-        # Database Validation
-        # ====================================================
-
-        validation_warnings = teacher.get(
-            "_validation_warnings",
-            []
-        )
-
-        if validation_warnings:
-
-            with st.expander(
-                "数据库资料提示"
-            ):
-
-                for warning in validation_warnings:
-
-                    st.warning(
-                        warning
-                    )
-
 
 # ============================================================
-# 8. Configuration Validation
+# Configuration
 # ============================================================
 
-config_errors = validate_config()
+errors = validate_config()
 
-if config_errors:
+if errors:
 
     st.error(
-        "系统配置尚未完成。"
+        "系统配置不完整"
     )
 
-    for error in config_errors:
+    for error in errors:
 
         st.write(
-            f"• {error}"
+            error
         )
-
-    st.info(
-        "请进入 Streamlit → "
-        "Manage app → Settings → Secrets "
-        "配置 Baserow 和 Gemini。"
-    )
 
     st.stop()
 
 
 # ============================================================
-# 9. Load Teachers
+# Teachers
 # ============================================================
 
 try:
@@ -788,7 +630,7 @@ try:
 except Exception as error:
 
     st.error(
-        "无法读取 Baserow Teachers 数据库。"
+        "无法读取老师数据库"
     )
 
     st.exception(
@@ -798,24 +640,8 @@ except Exception as error:
     st.stop()
 
 
-if not teachers:
-
-    st.warning(
-        "Baserow 中没有有效老师资料。"
-    )
-
-    st.stop()
-
-
-database_summary = (
-    build_database_summary(
-        teachers
-    )
-)
-
-
 # ============================================================
-# 10. Sidebar
+# Sidebar
 # ============================================================
 
 with st.sidebar:
@@ -834,17 +660,13 @@ with st.sidebar:
         "### 系统状态"
     )
 
-    # --------------------------------------------------------
-    # Baserow
-    # --------------------------------------------------------
-
     baserow_status = (
         check_baserow_connection()
     )
 
-    if baserow_status.get(
+    if baserow_status[
         "success"
-    ):
+    ]:
 
         st.success(
             "Baserow 已连接"
@@ -857,38 +679,30 @@ with st.sidebar:
         )
 
         st.caption(
-            baserow_status.get(
-                "message",
-                "",
-            )
+            baserow_status[
+                "message"
+            ]
         )
-
-    # --------------------------------------------------------
-    # Gemini
-    # --------------------------------------------------------
 
     gemini_status = (
         check_gemini_connection()
     )
 
-    if gemini_status.get(
+    if gemini_status[
         "success"
-    ):
+    ]:
 
         st.success(
             "Gemini 已连接"
         )
 
-        active_model = (
-            gemini_status.get(
-                "model"
-            )
-        )
-
-        if active_model:
+        if gemini_status.get(
+            "model"
+        ):
 
             st.caption(
-                f"模型：{active_model}"
+                "模型："
+                f'{gemini_status["model"]}'
             )
 
     else:
@@ -898,17 +712,12 @@ with st.sidebar:
         )
 
         st.caption(
-            gemini_status.get(
-                "message",
-                "",
-            )
+            gemini_status[
+                "message"
+            ]
         )
 
     st.divider()
-
-    # --------------------------------------------------------
-    # Database Summary
-    # --------------------------------------------------------
 
     st.markdown(
         "### 老师数据库"
@@ -916,61 +725,18 @@ with st.sidebar:
 
     st.metric(
         "老师总数",
-        database_summary.get(
-            "total_teachers",
-            0,
-        ),
-    )
-
-    st.caption(
-        "已填写孩子年龄范围："
-        f'{database_summary.get("complete_age_range", 0)}'
-    )
-
-    st.caption(
-        "已填写可接受城市："
-        f'{database_summary.get("with_preferred_cities", 0)}'
-    )
-
-    st.caption(
-        "已填写签证国家："
-        f'{database_summary.get("with_visa_countries", 0)}'
-    )
-
-    warning_count = (
-        database_summary.get(
-            "teachers_with_warnings",
-            0,
-        )
-    )
-
-    if warning_count:
-
-        st.warning(
-            f"{warning_count} 位老师资料存在缺失"
-        )
-
-    st.divider()
-
-    st.caption(
-        "Current City 仅展示，"
-        "不作为 Working City 匹配条件。"
-    )
-
-    st.caption(
-        "Desired Position 仅展示，"
-        "不参与候选人筛选。"
+        len(teachers),
     )
 
 
 # ============================================================
-# 11. Main Header
+# Header
 # ============================================================
 
 st.markdown(
     """
     <div class="main-title">
-        AI Teacher Matching System
+    AI Teacher Matching System
     </div>
     """,
     unsafe_allow_html=True,
@@ -979,8 +745,8 @@ st.markdown(
 st.markdown(
     """
     <div class="main-subtitle">
-        输入雇主需求，Gemini 自动解析招聘条件，
-        系统从 Baserow 教师数据库中筛选并排序候选人。
+    输入雇主需求，Gemini 自动解析，
+    Baserow 自动读取老师资料并执行匹配。
     </div>
     """,
     unsafe_allow_html=True,
@@ -988,43 +754,35 @@ st.markdown(
 
 
 # ============================================================
-# 12. Employer Requirement Input
+# Input
 # ============================================================
 
 st.markdown(
     """
     <div class="section-title">
-        1. 输入雇主需求
+    1. 输入雇主需求
     </div>
     """,
     unsafe_allow_html=True,
 )
 
 
-example_request = (
-    "北京家庭寻找一位住家育儿老师，"
-    "照顾4岁孩子。\n"
-    "老师必须愿意在北京工作，"
-    "英语流利，本科以上。\n"
-    "最好有5年以上教学或育儿经验。"
-)
-
-
 employer_request = st.text_area(
-    label="雇主需求",
-    value="",
+    "雇主需求",
     height=190,
-    placeholder=example_request,
+    placeholder=(
+        "例如：北京朝阳区住家，"
+        "4岁女宝，老师独立房间，"
+        "不用带睡，40岁以内，"
+        "英语好，本科以上。"
+    ),
 )
 
-
-# ============================================================
-# 13. Buttons
-# ============================================================
 
 button_col1, button_col2 = st.columns(
     [4, 1]
 )
+
 
 with button_col1:
 
@@ -1034,23 +792,22 @@ with button_col1:
         use_container_width=True,
     )
 
+
 with button_col2:
 
-    clear_results = st.button(
+    clear = st.button(
         "清除结果",
         use_container_width=True,
     )
 
 
-if clear_results:
+if clear:
 
-    session_keys = [
-        "parsed_requirements",
-        "matching_results",
-        "employer_request_saved",
-    ]
-
-    for key in session_keys:
+    for key in [
+        "parsed",
+        "results",
+        "saved_request",
+    ]:
 
         if key in st.session_state:
 
@@ -1062,217 +819,156 @@ if clear_results:
 
 
 # ============================================================
-# 14. Run Matching
+# Match
 # ============================================================
 
 if start_matching:
 
-    cleaned_request = (
-        employer_request
-        .strip()
-    )
-
-    if not cleaned_request:
+    if not employer_request.strip():
 
         st.warning(
-            "请先输入雇主需求。"
+            "请输入雇主需求"
         )
 
     else:
 
-        with st.spinner(
-            "Gemini 正在解析招聘需求并匹配老师..."
-        ):
+        try:
 
-            try:
+            with st.spinner(
+                "AI 正在解析并匹配..."
+            ):
 
-                parsed_requirements = (
+                parsed = (
                     parse_employer_requirement(
-                        cleaned_request
+                        employer_request
                     )
                 )
 
-                hard_requirements = (
-                    parsed_requirements.get(
-                        "hard_requirements",
-                        {},
-                    )
-                )
-
-                preferred_requirements = (
-                    parsed_requirements.get(
-                        "preferred_requirements",
-                        {},
-                    )
-                )
-
-                matching_results = (
+                results = (
                     run_matching(
                         teachers=teachers,
-                        hard_requirements=hard_requirements,
-                        preferred_requirements=preferred_requirements,
+                        hard_requirements=(
+                            parsed[
+                                "hard_requirements"
+                            ]
+                        ),
+                        preferred_requirements=(
+                            parsed[
+                                "preferred_requirements"
+                            ]
+                        ),
+                        reference_requirements=(
+                            parsed[
+                                "reference_requirements"
+                            ]
+                        ),
                         top_n=TOP_N,
                     )
                 )
 
                 st.session_state[
-                    "parsed_requirements"
-                ] = parsed_requirements
+                    "parsed"
+                ] = parsed
 
                 st.session_state[
-                    "matching_results"
-                ] = matching_results
+                    "results"
+                ] = results
 
                 st.session_state[
-                    "employer_request_saved"
-                ] = cleaned_request
+                    "saved_request"
+                ] = employer_request
 
-            except Exception as error:
+        except Exception as error:
 
-                st.error(
-                    "匹配过程中发生错误。"
-                )
+            st.error(
+                "匹配过程中发生错误"
+            )
 
-                st.exception(
-                    error
-                )
+            st.exception(
+                error
+            )
 
 
 # ============================================================
-# 15. Session Results
+# Parsed Result
 # ============================================================
 
-parsed_requirements = (
-    st.session_state.get(
-        "parsed_requirements"
-    )
+parsed = st.session_state.get(
+    "parsed"
 )
 
-matching_results = (
-    st.session_state.get(
-        "matching_results"
-    )
-)
-
-saved_request = (
-    st.session_state.get(
-        "employer_request_saved"
-    )
+results = st.session_state.get(
+    "results"
 )
 
 
-# ============================================================
-# 16. AI Parsed Requirements
-# ============================================================
-
-if parsed_requirements:
+if parsed:
 
     st.divider()
 
     st.markdown(
         """
         <div class="section-title">
-            2. AI 解析后的招聘条件
+        2. AI 解析后的招聘条件
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    if saved_request:
-
-        with st.expander(
-            "查看原始雇主需求"
-        ):
-
-            st.write(
-                saved_request
-            )
-
-    model_used = (
-        parsed_requirements.get(
-            "model_used"
-        )
-    )
-
-    if model_used:
-
-        st.caption(
-            f"Gemini Model：{model_used}"
-        )
-
-    # IMPORTANT:
-    # 必须在同一条 Python 语句中赋值
-    hard_col, preferred_col = st.columns(
-        2
+    hard_col, preferred_col, reference_col = st.columns(
+        3
     )
 
     with hard_col:
 
         render_requirement_group(
-            title="必须条件",
-            requirements=(
-                parsed_requirements.get(
-                    "hard_requirements",
-                    {},
-                )
-            ),
+            "必须条件",
+            parsed[
+                "hard_requirements"
+            ],
         )
 
     with preferred_col:
 
         render_requirement_group(
-            title="偏好条件",
-            requirements=(
-                parsed_requirements.get(
-                    "preferred_requirements",
-                    {},
-                )
-            ),
+            "偏好条件",
+            parsed[
+                "preferred_requirements"
+            ],
         )
 
-    warnings = (
-        parsed_requirements.get(
-            "warnings",
-            []
+    with reference_col:
+
+        render_requirement_group(
+            "参考条件",
+            parsed[
+                "reference_requirements"
+            ],
         )
-    )
-
-    if warnings:
-
-        with st.expander(
-            "AI 标准化提示"
-        ):
-
-            for warning in warnings:
-
-                st.warning(
-                    warning
-                )
 
     with st.expander(
-        "查看 Gemini 原始结构化结果"
+        "查看 Gemini 原始解析"
     ):
 
         st.json(
-            parsed_requirements.get(
-                "raw_requirements",
-                {},
-            )
+            parsed[
+                "raw_requirements"
+            ]
         )
 
 
 # ============================================================
-# 17. Matching Results
+# Results
 # ============================================================
 
-if matching_results is not None:
+if results is not None:
 
     st.divider()
 
     st.markdown(
         """
         <div class="section-title">
-            3. 推荐老师
+        3. 推荐老师
         </div>
         """,
         unsafe_allow_html=True,
@@ -1280,7 +976,7 @@ if matching_results is not None:
 
     summary = (
         build_matching_summary(
-            matching_results
+            results
         )
     )
 
@@ -1291,73 +987,55 @@ if matching_results is not None:
     with metric1:
 
         st.metric(
-            "显示候选人",
-            summary.get(
-                "total_results",
-                0,
-            ),
+            "候选人数",
+            summary[
+                "total_results"
+            ],
         )
 
     with metric2:
 
         st.metric(
             "符合全部硬条件",
-            summary.get(
-                "eligible_count",
-                0,
-            ),
+            summary[
+                "eligible_count"
+            ],
         )
 
     with metric3:
 
         st.metric(
-            "80%+ 匹配",
-            summary.get(
-                "high_match_count",
-                0,
-            ),
+            "80%+",
+            summary[
+                "high_match_count"
+            ],
         )
 
     with metric4:
 
-        best_score = (
-            summary.get(
-                "best_score",
-                0,
-            )
-        )
-
         st.metric(
             "最高匹配度",
-            f"{best_score}%",
+            f'{summary["best_score"]}%'
         )
 
-    if not matching_results:
+    for index, result in enumerate(
+        results,
+        start=1,
+    ):
 
-        st.warning(
-            "目前没有匹配结果。"
+        render_teacher_card(
+            index,
+            result,
         )
-
-    else:
-
-        for index, result in enumerate(
-            matching_results,
-            start=1,
-        ):
-
-            render_teacher_card(
-                rank=index,
-                result=result,
-            )
 
 
 # ============================================================
-# 18. Footer
+# Footer
 # ============================================================
 
 st.divider()
 
 st.caption(
-    "Teacher Matching System V1 · "
+    "Teacher Matching System V1.1 · "
     "Baserow + Gemini + Streamlit"
 )
