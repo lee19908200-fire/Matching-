@@ -880,7 +880,7 @@ if start_matching:
 
         except Exception as error:
 
-    error_text = str(error)
+        error_text = str(error)
 
     if (
         "429" in error_text
