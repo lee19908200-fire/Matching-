@@ -3,8 +3,7 @@
 # config.py
 #
 # 系统统一配置文件
-# 不在这里直接保存 API Key。
-# API Key 将通过 Streamlit Secrets 安全读取。
+# API Key / Token 从 Streamlit Secrets 读取
 # ============================================================
 
 import streamlit as st
@@ -29,38 +28,23 @@ except (KeyError, TypeError, ValueError):
 BASEROW_BASE_URL = "https://api.baserow.io"
 
 
-def get_baserow_table_url():
-    """
-    返回 Teachers 表 API 地址。
-    """
-
-    if TABLE_ID is None:
-        return None
-
-    return (
+if TABLE_ID is not None:
+    BASEROW_TABLE_URL = (
         f"{BASEROW_BASE_URL}"
         f"/api/database/rows/table/"
         f"{TABLE_ID}/"
     )
+else:
+    BASEROW_TABLE_URL = None
 
 
-BASEROW_TABLE_URL = get_baserow_table_url()
-
-
-def get_baserow_headers():
-    """
-    返回 Baserow API Headers。
-    """
-
-    if not BASEROW_TOKEN:
-        return {}
-
-    return {
-        "Authorization": (
-            f"Token {BASEROW_TOKEN}"
-        ),
+if BASEROW_TOKEN:
+    BASEROW_HEADERS = {
+        "Authorization": f"Token {BASEROW_TOKEN}",
         "Content-Type": "application/json",
     }
+else:
+    BASEROW_HEADERS = {}
 
 
 # ============================================================
@@ -68,25 +52,19 @@ def get_baserow_headers():
 # ============================================================
 
 try:
-    GEMINI_API_KEY = st.secrets[
-        "GEMINI_API_KEY"
-    ]
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 except KeyError:
     GEMINI_API_KEY = None
 
 
 try:
-    GEMINI_MODEL = st.secrets[
-        "GEMINI_MODEL"
-    ]
+    GEMINI_MODEL = st.secrets["GEMINI_MODEL"]
 except KeyError:
-    # 实际部署时建议在 Streamlit Secrets
-    # 明确填写当前可用模型。
     GEMINI_MODEL = ""
 
 
 # ============================================================
-# 3. Matching Configuration
+# 3. General Settings
 # ============================================================
 
 TOP_N = 5
@@ -96,23 +74,17 @@ BASEROW_PAGE_SIZE = 200
 REQUEST_TIMEOUT = 30
 
 
-# 硬条件与偏好条件的评分权重
+# ============================================================
+# 4. Matching Weights
+# ============================================================
+
 HARD_REQUIREMENT_WEIGHT = 0.80
 
 PREFERRED_REQUIREMENT_WEIGHT = 0.20
 
 
 # ============================================================
-# 4. Matching Fields
-#
-# Current City：
-# 只展示，不参与匹配。
-#
-# Desired Position：
-# 只展示，不参与匹配。
-#
-# Governor / Governess：
-# 不作为职位筛选条件。
+# 5. Matching Fields
 # ============================================================
 
 MULTI_SELECT_FIELDS = {
@@ -158,7 +130,7 @@ ALLOWED_REQUIREMENT_FIELDS = (
 
 
 # ============================================================
-# 5. China Working Cities
+# 6. China Tier 1 Cities
 # ============================================================
 
 CHINA_TIER_1_CITIES = [
@@ -168,6 +140,10 @@ CHINA_TIER_1_CITIES = [
     "Guangzhou",
 ]
 
+
+# ============================================================
+# 7. China Tier 2 / New Tier 1 Cities
+# ============================================================
 
 CHINA_TIER_2_AND_NEW_TIER_1_CITIES = [
     "Chengdu",
@@ -206,11 +182,19 @@ CHINA_TIER_2_AND_NEW_TIER_1_CITIES = [
 ]
 
 
+# ============================================================
+# 8. Special Administrative Regions
+# ============================================================
+
 SPECIAL_ADMINISTRATIVE_REGIONS = [
     "Hong Kong",
     "Macau",
 ]
 
+
+# ============================================================
+# 9. International Cities
+# ============================================================
 
 INTERNATIONAL_CITIES = [
     "Singapore",
@@ -228,6 +212,10 @@ INTERNATIONAL_CITIES = [
 ]
 
 
+# ============================================================
+# 10. Working City Options
+# ============================================================
+
 WORKING_CITY_OPTIONS = (
     CHINA_TIER_1_CITIES
     + CHINA_TIER_2_AND_NEW_TIER_1_CITIES
@@ -241,7 +229,7 @@ WORKING_CITY_OPTIONS = (
 
 
 # ============================================================
-# 6. Standard Database Options
+# 11. Standard Database Options
 # ============================================================
 
 STANDARD_OPTIONS = {
@@ -365,22 +353,17 @@ STANDARD_OPTIONS = {
         "Unknown",
     ],
 
-    "Working City": (
-        WORKING_CITY_OPTIONS
-    ),
+    "Working City": WORKING_CITY_OPTIONS,
 }
 
 
 # ============================================================
-# 7. Configuration Validation
+# 12. Configuration Validation
 # ============================================================
 
 def validate_config():
     """
-    检查系统是否已经配置好运行所需参数。
-
-    返回：
-    errors: list[str]
+    检查系统运行所需配置。
     """
 
     errors = []
