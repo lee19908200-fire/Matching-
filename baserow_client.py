@@ -14,16 +14,58 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from config import (
-    BASEROW_HEADERS,
-    BASEROW_PAGE_SIZE,
-    BASEROW_TABLE_URL,
-    REQUEST_TIMEOUT,
-)
+import config
 
 
 # ============================================================
-# 1. Baserow Value Normalization
+# 1. Baserow Configuration
+# ============================================================
+
+BASEROW_TOKEN = getattr(
+    config,
+    "BASEROW_TOKEN",
+    None,
+)
+
+TABLE_ID = getattr(
+    config,
+    "TABLE_ID",
+    None,
+)
+
+BASEROW_PAGE_SIZE = getattr(
+    config,
+    "BASEROW_PAGE_SIZE",
+    200,
+)
+
+REQUEST_TIMEOUT = getattr(
+    config,
+    "REQUEST_TIMEOUT",
+    30,
+)
+
+
+if TABLE_ID is not None:
+    BASEROW_TABLE_URL = (
+        "https://api.baserow.io"
+        f"/api/database/rows/table/{TABLE_ID}/"
+    )
+else:
+    BASEROW_TABLE_URL = None
+
+
+if BASEROW_TOKEN:
+    BASEROW_HEADERS = {
+        "Authorization": f"Token {BASEROW_TOKEN}",
+        "Content-Type": "application/json",
+    }
+else:
+    BASEROW_HEADERS = {}
+
+
+# ============================================================
+# 2. Baserow Value Normalization
 # ============================================================
 
 def normalize_baserow_value(
@@ -35,50 +77,44 @@ def normalize_baserow_value(
     Single Select:
     {
         "id": 123,
-        "value": "United Kingdom",
-        "color": "blue"
+        "value": "United Kingdom"
     }
 
     转换为：
 
     "United Kingdom"
 
-
     Multiple Select:
     [
-        {
-            "id": 1,
-            "value": "IB"
-        },
-        {
-            "id": 2,
-            "value": "A-Level"
-        }
+        {"id": 1, "value": "IB"},
+        {"id": 2, "value": "A-Level"}
     ]
 
     转换为：
 
-    [
-        "IB",
-        "A-Level"
-    ]
+    ["IB", "A-Level"]
     """
 
     if isinstance(value, list):
+
         normalized_values = []
 
         for item in value:
+
             if isinstance(item, dict):
+
                 option_value = item.get(
                     "value"
                 )
 
                 if option_value is not None:
+
                     normalized_values.append(
                         option_value
                     )
 
             elif item is not None:
+
                 normalized_values.append(
                     item
                 )
@@ -86,24 +122,26 @@ def normalize_baserow_value(
         return normalized_values
 
     if isinstance(value, dict):
-        return value.get(
-            "value"
-        )
+
+        if "value" in value:
+            return value.get(
+                "value"
+            )
+
+        return value
 
     return value
 
 
 # ============================================================
-# 2. Number Conversion
+# 3. Number Conversion
 # ============================================================
 
 def to_number(
     value: Any
 ) -> Optional[float]:
     """
-    将字段安全转换成 float。
-
-    空值返回 None。
+    安全转换成 float。
     """
 
     if value is None:
@@ -113,24 +151,28 @@ def to_number(
         return None
 
     try:
-        return float(value)
+
+        return float(
+            value
+        )
 
     except (
         TypeError,
         ValueError,
     ):
+
         return None
 
 
 # ============================================================
-# 3. Boolean Conversion
+# 4. Boolean Conversion
 # ============================================================
 
 def to_boolean(
     value: Any
 ) -> bool:
     """
-    将值规范化成 bool。
+    将 Baserow Boolean / Checkbox 转成 bool。
     """
 
     if isinstance(
@@ -139,15 +181,20 @@ def to_boolean(
     ):
         return value
 
-    if value in {
-        1,
+    if value is None:
+        return False
+
+    normalized = (
+        str(value)
+        .strip()
+        .lower()
+    )
+
+    if normalized in {
         "1",
         "true",
-        "True",
-        "TRUE",
         "yes",
-        "Yes",
-        "YES",
+        "y",
     }:
         return True
 
@@ -155,7 +202,7 @@ def to_boolean(
 
 
 # ============================================================
-# 4. Fields Expected to be Lists
+# 5. Field Groups
 # ============================================================
 
 LIST_FIELDS = [
@@ -189,21 +236,21 @@ NUMBER_FIELDS = [
 
 
 # ============================================================
-# 5. Normalize Teacher Record
+# 6. Normalize Teacher Record
 # ============================================================
 
 def normalize_teacher_record(
     row: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    将一条 Baserow row 转换为
-    系统内部统一 Teacher Dictionary。
+    将一条 Baserow Teacher row
+    转换为系统统一格式。
     """
 
     teacher = {
         "Baserow ID": row.get(
             "id"
-        ),
+        )
     }
 
     for (
@@ -228,6 +275,7 @@ def normalize_teacher_record(
     # --------------------------------------------------------
 
     for field_name in NUMBER_FIELDS:
+
         teacher[field_name] = (
             to_number(
                 teacher.get(
@@ -236,13 +284,13 @@ def normalize_teacher_record(
             )
         )
 
-    # Teaching years 缺失时默认 0
     if (
         teacher.get(
             "Years of Teaching"
         )
         is None
     ):
+
         teacher[
             "Years of Teaching"
         ] = 0.0
@@ -252,6 +300,7 @@ def normalize_teacher_record(
     # --------------------------------------------------------
 
     for field_name in LIST_FIELDS:
+
         value = teacher.get(
             field_name
         )
@@ -263,10 +312,16 @@ def normalize_teacher_record(
             continue
 
         if value is None:
-            teacher[field_name] = []
+
+            teacher[
+                field_name
+            ] = []
 
         else:
-            teacher[field_name] = [
+
+            teacher[
+                field_name
+            ] = [
                 value
             ]
 
@@ -275,6 +330,7 @@ def normalize_teacher_record(
     # --------------------------------------------------------
 
     for field_name in BOOLEAN_FIELDS:
+
         teacher[field_name] = (
             to_boolean(
                 teacher.get(
@@ -287,16 +343,14 @@ def normalize_teacher_record(
 
 
 # ============================================================
-# 6. Validate Teacher Record
+# 7. Validate Teacher Record
 # ============================================================
 
 def validate_teacher_record(
     teacher: Dict[str, Any]
 ) -> List[str]:
     """
-    检查一位老师是否缺少关键资料。
-
-    返回 warning list。
+    检查老师资料是否缺少重要字段。
     """
 
     warnings = []
@@ -304,6 +358,7 @@ def validate_teacher_record(
     if not teacher.get(
         "First Name"
     ):
+
         warnings.append(
             "缺少 First Name"
         )
@@ -311,6 +366,7 @@ def validate_teacher_record(
     if not teacher.get(
         "Last Name"
     ):
+
         warnings.append(
             "缺少 Last Name"
         )
@@ -318,6 +374,7 @@ def validate_teacher_record(
     if not teacher.get(
         "Nationality"
     ):
+
         warnings.append(
             "缺少 Nationality"
         )
@@ -328,6 +385,7 @@ def validate_teacher_record(
         )
         is None
     ):
+
         warnings.append(
             "缺少 Minimum Child Age"
         )
@@ -338,6 +396,7 @@ def validate_teacher_record(
         )
         is None
     ):
+
         warnings.append(
             "缺少 Maximum Child Age"
         )
@@ -345,6 +404,7 @@ def validate_teacher_record(
     if not teacher.get(
         "Preferred Cities"
     ):
+
         warnings.append(
             "缺少 Preferred Cities"
         )
@@ -352,6 +412,7 @@ def validate_teacher_record(
     if not teacher.get(
         "Visa / Work Authorization Countries"
     ):
+
         warnings.append(
             "缺少 Visa / Work Authorization Countries"
         )
@@ -369,6 +430,7 @@ def validate_teacher_record(
         and maximum_age is not None
         and minimum_age > maximum_age
     ):
+
         warnings.append(
             "Minimum Child Age 大于 Maximum Child Age"
         )
@@ -377,7 +439,35 @@ def validate_teacher_record(
 
 
 # ============================================================
-# 7. Fetch One Page from Baserow
+# 8. Configuration Check
+# ============================================================
+
+def validate_baserow_configuration():
+    """
+    检查 Baserow 所需配置。
+    """
+
+    if not BASEROW_TOKEN:
+
+        raise RuntimeError(
+            "BASEROW_TOKEN 未配置。"
+        )
+
+    if TABLE_ID is None:
+
+        raise RuntimeError(
+            "TABLE_ID 未配置。"
+        )
+
+    if not BASEROW_TABLE_URL:
+
+        raise RuntimeError(
+            "无法生成 Baserow Table URL。"
+        )
+
+
+# ============================================================
+# 9. Fetch Teacher Page
 # ============================================================
 
 def fetch_teacher_page(
@@ -388,15 +478,7 @@ def fetch_teacher_page(
     从 Baserow 读取一页 Teachers 数据。
     """
 
-    if not BASEROW_TABLE_URL:
-        raise RuntimeError(
-            "Baserow Table URL 未配置。"
-        )
-
-    if not BASEROW_HEADERS:
-        raise RuntimeError(
-            "Baserow API Headers 未配置。"
-        )
+    validate_baserow_configuration()
 
     response = requests.get(
         BASEROW_TABLE_URL,
@@ -410,28 +492,35 @@ def fetch_teacher_page(
     )
 
     if response.status_code != 200:
+
         raise RuntimeError(
             "读取 Baserow Teachers 失败。\n"
-            f"HTTP 状态码："
-            f"{response.status_code}\n"
-            f"错误内容："
-            f"{response.text}"
+            f"HTTP 状态码：{response.status_code}\n"
+            f"错误内容：{response.text}"
         )
 
-    return response.json()
+    try:
+
+        return response.json()
+
+    except ValueError as error:
+
+        raise RuntimeError(
+            "Baserow 返回内容不是有效 JSON。"
+        ) from error
 
 
 # ============================================================
-# 8. Load All Teachers
+# 10. Load All Teachers
 # ============================================================
 
 def load_teachers(
     include_validation: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    读取全部 Teachers。
+    读取全部老师。
 
-    自动处理 Baserow pagination。
+    自动处理 pagination。
     """
 
     teachers = []
@@ -439,6 +528,7 @@ def load_teachers(
     page = 1
 
     while True:
+
         payload = fetch_teacher_page(
             page=page,
             size=BASEROW_PAGE_SIZE,
@@ -450,17 +540,21 @@ def load_teachers(
         )
 
         for row in rows:
-            teacher = normalize_teacher_record(
-                row
+
+            teacher = (
+                normalize_teacher_record(
+                    row
+                )
             )
 
-            # 跳过完全空白的测试行
+            # 跳过完全没有 First Name 的空白测试行
             if not teacher.get(
                 "First Name"
             ):
                 continue
 
             if include_validation:
+
                 teacher[
                     "_validation_warnings"
                 ] = (
@@ -486,20 +580,20 @@ def load_teachers(
 
 
 # ============================================================
-# 9. Get Teacher by Baserow ID
+# 11. Get Teacher by Baserow ID
 # ============================================================
 
 def get_teacher_by_id(
-    teacher_id: int,
+    teacher_id: int
 ) -> Optional[Dict[str, Any]]:
     """
-    从已经读取的 Teachers 中
-    根据 Baserow ID 找老师。
+    根据 Baserow ID 获取老师。
     """
 
     teachers = load_teachers()
 
     for teacher in teachers:
+
         if (
             teacher.get(
                 "Baserow ID"
@@ -507,24 +601,25 @@ def get_teacher_by_id(
             ==
             teacher_id
         ):
+
             return teacher
 
     return None
 
 
 # ============================================================
-# 10. Search Teacher by Name
+# 12. Search Teacher by Name
 # ============================================================
 
 def search_teachers_by_name(
     query: str
 ) -> List[Dict[str, Any]]:
     """
-    根据老师姓名做简单搜索。
+    根据姓名搜索老师。
     """
 
     normalized_query = (
-        query
+        str(query)
         .strip()
         .lower()
     )
@@ -537,6 +632,7 @@ def search_teachers_by_name(
     results = []
 
     for teacher in teachers:
+
         first_name = str(
             teacher.get(
                 "First Name"
@@ -552,14 +648,16 @@ def search_teachers_by_name(
         )
 
         full_name = (
-            f"{first_name} "
-            f"{last_name}"
-        ).strip().lower()
+            f"{first_name} {last_name}"
+            .strip()
+            .lower()
+        )
 
         if (
             normalized_query
             in full_name
         ):
+
             results.append(
                 teacher
             )
@@ -568,12 +666,12 @@ def search_teachers_by_name(
 
 
 # ============================================================
-# 11. Get Database Summary
+# 13. Database Summary
 # ============================================================
 
 def get_teacher_database_summary() -> Dict[str, Any]:
     """
-    返回数据库基本统计。
+    返回老师数据库统计信息。
     """
 
     teachers = load_teachers()
@@ -585,7 +683,6 @@ def get_teacher_database_summary() -> Dict[str, Any]:
     complete_age_range = 0
     with_preferred_cities = 0
     with_visa_countries = 0
-
     teachers_with_warnings = 0
 
     for teacher in teachers:
@@ -600,21 +697,25 @@ def get_teacher_database_summary() -> Dict[str, Any]:
             )
             is not None
         ):
+
             complete_age_range += 1
 
         if teacher.get(
             "Preferred Cities"
         ):
+
             with_preferred_cities += 1
 
         if teacher.get(
             "Visa / Work Authorization Countries"
         ):
+
             with_visa_countries += 1
 
         if teacher.get(
             "_validation_warnings"
         ):
+
             teachers_with_warnings += 1
 
     return {
@@ -641,15 +742,16 @@ def get_teacher_database_summary() -> Dict[str, Any]:
 
 
 # ============================================================
-# 12. Health Check
+# 14. Baserow Health Check
 # ============================================================
 
 def check_baserow_connection() -> Dict[str, Any]:
     """
-    检查 Baserow API 是否连接正常。
+    测试 Baserow 连接。
     """
 
     try:
+
         payload = fetch_teacher_page(
             page=1,
             size=1,
@@ -667,6 +769,7 @@ def check_baserow_connection() -> Dict[str, Any]:
         }
 
     except Exception as error:
+
         return {
             "success": False,
             "message": str(
