@@ -1,16 +1,15 @@
 # ============================================================
-# Teacher Matching System V1
+# Teacher Matching System V1.1
 # config.py
 #
-# 系统统一配置文件
-# API Key / Token 从 Streamlit Secrets 读取
+# Unified application configuration
 # ============================================================
 
 import streamlit as st
 
 
 # ============================================================
-# 1. Baserow Configuration
+# 1. Secrets
 # ============================================================
 
 try:
@@ -20,12 +19,34 @@ except KeyError:
 
 
 try:
-    TABLE_ID = int(st.secrets["TABLE_ID"])
+    TABLE_ID = int(
+        st.secrets["TABLE_ID"]
+    )
 except (KeyError, TypeError, ValueError):
     TABLE_ID = None
 
 
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except KeyError:
+    GEMINI_API_KEY = None
+
+
+try:
+    GEMINI_MODEL = st.secrets["GEMINI_MODEL"]
+except KeyError:
+    GEMINI_MODEL = ""
+
+
+# ============================================================
+# 2. Baserow
+# ============================================================
+
 BASEROW_BASE_URL = "https://api.baserow.io"
+
+BASEROW_PAGE_SIZE = 200
+
+REQUEST_TIMEOUT = 30
 
 
 if TABLE_ID is not None:
@@ -48,43 +69,21 @@ else:
 
 
 # ============================================================
-# 2. Gemini Configuration
-# ============================================================
-
-try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-except KeyError:
-    GEMINI_API_KEY = None
-
-
-try:
-    GEMINI_MODEL = st.secrets["GEMINI_MODEL"]
-except KeyError:
-    GEMINI_MODEL = ""
-
-
-# ============================================================
-# 3. General Settings
+# 3. Matching Settings
 # ============================================================
 
 TOP_N = 5
 
-BASEROW_PAGE_SIZE = 200
 
-REQUEST_TIMEOUT = 30
-
-
-# ============================================================
-# 4. Matching Weights
-# ============================================================
-
-HARD_REQUIREMENT_WEIGHT = 0.80
+HARD_REQUIREMENT_WEIGHT = 0.70
 
 PREFERRED_REQUIREMENT_WEIGHT = 0.20
 
+REFERENCE_REQUIREMENT_WEIGHT = 0.10
+
 
 # ============================================================
-# 5. Matching Fields
+# 4. Field Groups
 # ============================================================
 
 MULTI_SELECT_FIELDS = {
@@ -103,6 +102,7 @@ BOOLEAN_FIELDS = {
     "Willing to Travel",
     "Driving",
     "Nanny Educator Experience",
+    "Night Care",
 }
 
 
@@ -110,14 +110,17 @@ EXACT_TEXT_FIELDS = {
     "Nationality",
     "Current Country",
     "Visa Status",
-    "Highest Degree",
 }
 
 
 SPECIAL_MATCH_FIELDS = {
     "Working City",
-    "Child Age",
     "Minimum Years of Teaching",
+    "Minimum Teacher Age",
+    "Maximum Teacher Age",
+    "Minimum Degree",
+    "Private Room Provided",
+    "Child Age",
 }
 
 
@@ -130,7 +133,21 @@ ALLOWED_REQUIREMENT_FIELDS = (
 
 
 # ============================================================
-# 6. China Tier 1 Cities
+# 5. Degree Ranking
+# ============================================================
+
+DEGREE_RANK = {
+    "High School": 1,
+    "Diploma": 2,
+    "Associate Degree": 3,
+    "Bachelor": 4,
+    "Master": 5,
+    "Doctorate": 6,
+}
+
+
+# ============================================================
+# 6. China Cities
 # ============================================================
 
 CHINA_TIER_1_CITIES = [
@@ -140,10 +157,6 @@ CHINA_TIER_1_CITIES = [
     "Guangzhou",
 ]
 
-
-# ============================================================
-# 7. China Tier 2 / New Tier 1 Cities
-# ============================================================
 
 CHINA_TIER_2_AND_NEW_TIER_1_CITIES = [
     "Chengdu",
@@ -182,19 +195,11 @@ CHINA_TIER_2_AND_NEW_TIER_1_CITIES = [
 ]
 
 
-# ============================================================
-# 8. Special Administrative Regions
-# ============================================================
-
 SPECIAL_ADMINISTRATIVE_REGIONS = [
     "Hong Kong",
     "Macau",
 ]
 
-
-# ============================================================
-# 9. International Cities
-# ============================================================
 
 INTERNATIONAL_CITIES = [
     "Singapore",
@@ -212,10 +217,6 @@ INTERNATIONAL_CITIES = [
 ]
 
 
-# ============================================================
-# 10. Working City Options
-# ============================================================
-
 WORKING_CITY_OPTIONS = (
     CHINA_TIER_1_CITIES
     + CHINA_TIER_2_AND_NEW_TIER_1_CITIES
@@ -229,10 +230,11 @@ WORKING_CITY_OPTIONS = (
 
 
 # ============================================================
-# 11. Standard Database Options
+# 7. Standard Options
 # ============================================================
 
 STANDARD_OPTIONS = {
+
     "Nationality": [
         "United Kingdom",
         "United States",
@@ -280,6 +282,15 @@ STANDARD_OPTIONS = {
         "Doctorate",
         "Other",
         "Unknown",
+    ],
+
+    "Minimum Degree": [
+        "High School",
+        "Diploma",
+        "Associate Degree",
+        "Bachelor",
+        "Master",
+        "Doctorate",
     ],
 
     "Subjects": [
@@ -358,13 +369,10 @@ STANDARD_OPTIONS = {
 
 
 # ============================================================
-# 12. Configuration Validation
+# 8. Validation
 # ============================================================
 
 def validate_config():
-    """
-    检查系统运行所需配置。
-    """
 
     errors = []
 
@@ -383,10 +391,4 @@ def validate_config():
             "缺少 GEMINI_API_KEY"
         )
 
-    if not GEMINI_MODEL:
-        errors.append(
-            "缺少 GEMINI_MODEL"
-        )
-
     return errors
-# force streamlit redeploy
