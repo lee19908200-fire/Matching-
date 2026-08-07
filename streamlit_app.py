@@ -880,13 +880,38 @@ if start_matching:
 
         except Exception as error:
 
-            st.error(
-                "匹配过程中发生错误"
-            )
+    error_text = str(error)
 
-            st.exception(
-                error
-            )
+    if (
+        "429" in error_text
+        or "RESOURCE_EXHAUSTED" in error_text
+        or "quota" in error_text.lower()
+    ):
+
+        st.error(
+            "Gemini API 今日请求额度已用完。"
+        )
+
+        st.warning(
+            "你的 Gemini 免费额度目前已经达到每日上限。"
+            "请等待每日额度重置后再次匹配，"
+            "或者以后为 Gemini API 开通付费额度。"
+        )
+
+        st.info(
+            "这不会影响 Baserow 数据库。"
+            "老师资料仍然安全保存在 Baserow 中。"
+        )
+
+    else:
+
+        st.error(
+            "匹配过程中发生错误。"
+        )
+
+        st.exception(
+            error
+        )
 
 
 # ============================================================
