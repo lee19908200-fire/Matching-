@@ -824,7 +824,9 @@ if clear:
 
 if start_matching:
 
-    if not employer_request.strip():
+    request_text = employer_request.strip()
+
+    if not request_text:
 
         st.warning(
             "请输入雇主需求"
@@ -838,33 +840,64 @@ if start_matching:
                 "AI 正在解析并匹配..."
             ):
 
+                # --------------------------------------------
+                # 1. Gemini 解析雇主需求
+                # --------------------------------------------
+
                 parsed = (
                     parse_employer_requirement(
-                        employer_request
+                        request_text
                     )
                 )
+
+                # --------------------------------------------
+                # 2. 读取三类条件
+                # --------------------------------------------
+
+                hard_requirements = (
+                    parsed.get(
+                        "hard_requirements",
+                        {},
+                    )
+                )
+
+                preferred_requirements = (
+                    parsed.get(
+                        "preferred_requirements",
+                        {},
+                    )
+                )
+
+                reference_requirements = (
+                    parsed.get(
+                        "reference_requirements",
+                        {},
+                    )
+                )
+
+                # --------------------------------------------
+                # 3. 执行匹配
+                # --------------------------------------------
 
                 results = (
                     run_matching(
                         teachers=teachers,
                         hard_requirements=(
-                            parsed[
-                                "hard_requirements"
-                            ]
+                            hard_requirements
                         ),
                         preferred_requirements=(
-                            parsed[
-                                "preferred_requirements"
-                            ]
+                            preferred_requirements
                         ),
                         reference_requirements=(
-                            parsed[
-                                "reference_requirements"
-                            ]
+                            reference_requirements
                         ),
                         top_n=TOP_N,
                     )
                 )
+
+                # --------------------------------------------
+                # 4. 保存结果
+                # --------------------------------------------
 
                 st.session_state[
                     "parsed"
@@ -876,46 +909,80 @@ if start_matching:
 
                 st.session_state[
                     "saved_request"
-                ] = employer_request
-except Exception as error:
+                ] = request_text
 
-        error_text = str(error)
+        except Exception as error:
 
-    if (
-        "429" in error_text
-        or "RESOURCE_EXHAUSTED" in error_text
-        or "quota" in error_text.lower()
-    ):
+            error_text = str(
+                error
+            )
 
-        st.error(
-            "Gemini API 今日请求额度已用完。"
-        )
+            # --------------------------------------------
+            # Gemini quota / 429
+            # --------------------------------------------
 
-        st.warning(
-            "你的 Gemini 免费额度目前已经达到每日上限。"
-            "请等待每日额度重置后再次匹配，"
-            "或者以后为 Gemini API 开通付费额度。"
-        )
+            if (
+                "429" in error_text
+                or
+                "RESOURCE_EXHAUSTED" in error_text
+                or
+                "quota" in error_text.lower()
+                or
+                "rate limit" in error_text.lower()
+            ):
 
-        st.info(
-            "这不会影响 Baserow 数据库。"
-            "老师资料仍然安全保存在 Baserow 中。"
-        )
+                st.error(
+                    "Gemini API 请求额度暂时已用完。"
+                )
 
-    else:
+                st.warning(
+                    "当前 Gemini API 已达到请求额度限制。"
+                    "这不是程序错误，也不会影响 "
+                    "Baserow 中保存的老师资料。"
+                )
 
-        st.error(
-            "匹配过程中发生错误。"
-        )
+                st.info(
+                    "等 Gemini API 额度恢复后，"
+                    "再次点击「开始匹配」即可。"
+                )
 
-        st.exception(
-            error
-        )
+            # --------------------------------------------
+            # Other errors
+            # --------------------------------------------
+
+            else:
+
+                st.error(
+                    "匹配过程中发生错误。"
+                )
+
+                st.exception(
+                    error
+                )
 
 
 # ============================================================
 # Parsed Result
 # ============================================================
+
+parsed = (
+    st.session_state.get(
+        "parsed"
+    )
+)
+
+results = (
+    st.session_state.get(
+        "results"
+    )
+)
+
+saved_request = (
+    st.session_state.get(
+        "saved_request"
+    )
+)
+
 
 parsed = st.session_state.get(
     "parsed"
