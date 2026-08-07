@@ -877,8 +877,7 @@ if start_matching:
                 st.session_state[
                     "saved_request"
                 ] = employer_request
-
-        except Exception as error:
+except Exception as error:
 
         error_text = str(error)
 
