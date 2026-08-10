@@ -701,31 +701,74 @@ def normalize_requirement_field(
         warnings,
     )
 
-
 # ============================================================
-# 9. Normalize Group
+# 9. Normalize Requirement Group
+#
+# 负责：
+# - 处理 Gemini 返回的 hard / preferred / reference
+# - 支持字符串、数字、Boolean、List
+# - 避免 List 出现 unhashable type 错误
 # ============================================================
 
 def normalize_requirement_group(
     requirements: Dict[str, Any]
-):
+) -> Tuple[
+    Dict[str, Any],
+    List[str],
+]:
+    """
+    标准化 Gemini 返回的一组招聘条件。
 
-    result = {}
+    requirements 示例：
+
+    {
+        "Working City": "Beijing",
+        "Teaching Languages": ["English"],
+        "Maximum Teacher Age": 40,
+        "Live-in": True
+    }
+
+    返回：
+
+    (
+        normalized_requirements,
+        warnings
+    )
+    """
+
+    normalized_requirements = {}
 
     warnings = []
+
+    # --------------------------------------------------------
+    # 1. Gemini 返回值必须是 dictionary
+    # --------------------------------------------------------
 
     if not isinstance(
         requirements,
         dict,
     ):
 
-        return {}, [
-            "Requirement 不是 dictionary"
-        ]
+        return (
+            {},
+            [
+                "Requirement 格式错误："
+                "Gemini 返回内容不是 dictionary。"
+            ],
+        )
 
-    for field, value in (
-        requirements.items()
-    ):
+    # --------------------------------------------------------
+    # 2. 逐个处理字段
+    # --------------------------------------------------------
+
+    for (
+        field,
+        value,
+    ) in requirements.items():
+
+        # ----------------------------------------------------
+        # 永远不参与匹配的旧字段
+        # ----------------------------------------------------
 
         if field in {
             "Current City",
@@ -735,6 +778,10 @@ def normalize_requirement_group(
 
             continue
 
+        # ----------------------------------------------------
+        # 不允许的字段
+        # ----------------------------------------------------
+
         if (
             field
             not in
@@ -742,34 +789,103 @@ def normalize_requirement_group(
         ):
 
             warnings.append(
-                f"忽略字段：{field}"
+                f"忽略未支持字段：{field}"
             )
 
             continue
 
-        if value in {
-            None,
-            "",
-        }:
+        # ----------------------------------------------------
+        # Empty Value Check
+        #
+        # IMPORTANT:
+        #
+        # 不能写：
+        #
+        # if value in {None, ""}:
+        #
+        # 因为 Gemini 可能返回 list：
+        #
+        # ["English"]
+        #
+        # list 是 unhashable，
+        # 会直接出现：
+        #
+        # TypeError:
+        # unhashable type: 'list'
+        # ----------------------------------------------------
 
+        if value is None:
             continue
 
-        normalized, field_warnings = (
+        if value == "":
+            continue
+
+        if value == []:
+            continue
+
+        if value == {}:
+            continue
+
+        # ----------------------------------------------------
+        # 3. 标准化字段
+        # ----------------------------------------------------
+
+        (
+            normalized_value,
+            field_warnings,
+        ) = (
             normalize_requirement_field(
                 field,
                 value,
             )
         )
 
-        warnings.extend(
-            field_warnings
-        )
+        # ----------------------------------------------------
+        # 4. 收集 warnings
+        # ----------------------------------------------------
 
-        if normalized is not None:
+        if field_warnings:
 
-            result[field] = normalized
+            warnings.extend(
+                field_warnings
+            )
 
-    return result, warnings
+        # ----------------------------------------------------
+        # 5. 标准化失败
+        # ----------------------------------------------------
+
+        if normalized_value is None:
+            continue
+
+        # ----------------------------------------------------
+        # 6. 标准化后为空
+        # ----------------------------------------------------
+
+        if normalized_value == "":
+            continue
+
+        if normalized_value == []:
+            continue
+
+        if normalized_value == {}:
+            continue
+
+        # ----------------------------------------------------
+        # 7. 保存
+        # ----------------------------------------------------
+
+        normalized_requirements[
+            field
+        ] = normalized_value
+
+    # --------------------------------------------------------
+    # 8. Return
+    # --------------------------------------------------------
+
+    return (
+        normalized_requirements,
+        warnings,
+    )
 
 
 # ============================================================
