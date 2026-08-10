@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V1.4.1
+# AI Teacher Matching System V1.5
 # Single-file Streamlit app
 #
 # Goals
@@ -10,6 +10,7 @@
 #   requirements in a manual-review section; they do NOT affect
 #   automatic ranking or eligibility.
 # - Treat missing teacher data as "待确认", not as automatic failure.
+# - Unknown hard conditions reduce the displayed match score, so pending candidates cannot show misleading 100%.
 # - Child age is a reference-fit signal only, not a hard rejection.
 # ============================================================
 
@@ -31,7 +32,7 @@ from google.genai import types
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V1.4.1",
+    page_title="AI Teacher Matching System V1.5",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -77,7 +78,7 @@ BASEROW_BASE_URL = "https://api.baserow.io"
 BASEROW_PAGE_SIZE = 200
 REQUEST_TIMEOUT = 30
 TOP_N = 10
-BATCH_CHUNK_SIZE = 8
+BATCH_CHUNK_SIZE = 5
 
 HARD_WEIGHT = 0.70
 PREFERRED_WEIGHT = 0.20
@@ -132,6 +133,7 @@ CITY_ALIASES = {
     "海口": "Haikou", "海口市": "Haikou",
     "宜昌": "Yichang", "宜昌市": "Yichang",
     "沧州": "Cangzhou", "沧州市": "Cangzhou",
+    "上饶": "Shangrao", "上饶市": "Shangrao",
     "南通": "Nantong", "南通市": "Nantong",
     "香港": "Hong Kong", "澳门": "Macau",
     "新加坡": "Singapore", "伦敦": "London", "悉尼": "Sydney",
@@ -169,6 +171,7 @@ ALLOWED_MATCH_FIELDS = {
     "Kindergarten Experience",
     "High-end Family Experience",
     "Private Tutoring Experience",
+    "Nanny Educator Experience",
     "SEN / ADHD Experience",
     "Willing to Travel",
     "Cooking Required",
@@ -479,6 +482,7 @@ AUTOMATED MATCHING FIELDS ALLOWED IN hard_requirements / preferred_requirements:
 - Kindergarten Experience: boolean
 - High-end Family Experience: boolean
 - Private Tutoring Experience: boolean
+- Nanny Educator Experience: boolean
 - SEN / ADHD Experience: boolean
 - Willing to Travel: boolean
 - Cooking Required: boolean
@@ -518,23 +522,24 @@ INTERPRETATION RULES:
 7. 早教 / 0-3岁早教 -> Early Years Experience=true.
 8. 蒙氏 / Montessori -> Montessori Experience=true. If a Montessori certificate is explicitly required, also put it in Required Certificates.
 9. 国际学校经历 -> International School Experience=true. 孩子就读国际学校 alone does NOT prove teacher experience; it can remain order context.
-10. 幼儿园工作经历 -> Kindergarten Experience=true.
-11. ADHD / SEN child -> SEN / ADHD Experience=true.
-12. 全科辅导 -> General Tutoring Experience=true.
-13. 家校对接 / 家校沟通 -> Family-School Communication Required=true.
-14. 开车接送 / 熟练驾驶 -> Driving Required=true; 接送孩子 -> School Pick-up Required=true when driving/pickup is part of the job.
-15. 跟随老板出差 -> Willing to Travel=true.
-16. 辅食 -> Baby Food Required=true. 做饭/家常菜 -> Cooking Required=true. 家务/收纳 -> Housekeeping Required=true.
-17. 营养搭配 -> Nutrition Planning=true.
-18. 星级酒店从业经验 -> Luxury Hotel Experience=true.
-19. PET/KET/AP/SAT exam preparation: put exam names under Exam Preparation when the job asks for exam preparation.
-20. IB/AP/IGCSE/A-Level familiarity -> Curriculum array.
-21. "最好/优先/优先考虑/ideally/preferred" -> preferred_requirements.
+10. 幼儿园工作经历 -> Kindergarten Experience=true. If it says 幼儿园经历优先, put it in preferred_requirements.
+11. 有真实上户经历 / 陪伴师经历 / 儿陪师经历 / 育儿师经历 -> Nanny Educator Experience=true. If a number of years is stated, also set Minimum Years of Relevant Experience.
+12. ADHD / SEN child, when the teacher is expected to support that need -> SEN / ADHD Experience=true.
+13. 全科辅导 -> General Tutoring Experience=true.
+14. 家校对接 / 家校沟通 -> Family-School Communication Required=true.
+15. 开车接送 / 熟练驾驶 -> Driving Required=true; 接送孩子 -> School Pick-up Required=true when driving/pickup is part of the job.
+16. 跟随老板出差 -> Willing to Travel=true.
+17. 辅食 -> Baby Food Required=true. 做饭/家常菜 -> Cooking Required=true. 家务/收纳 -> Housekeeping Required=true.
+18. 营养搭配 -> Nutrition Planning=true.
+19. 星级酒店从业经验 -> Luxury Hotel Experience=true.
+20. PET/KET/AP/SAT exam preparation: put exam names under Exam Preparation when the job asks for exam preparation.
+21. IB/AP/IGCSE/A-Level familiarity -> Curriculum array.
+22. "最好/优先/优先考虑/ideally/preferred" -> preferred_requirements.
     Explicit "要求/必须/需要/工作内容必须完成" -> hard_requirements.
-22. "无需家务/不做家务" means Housekeeping Required=false or simply omit it; it must never reject a teacher.
-23. Job title such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 goes to Job Type only.
-24. Do not invent qualifications that are not stated.
-25. If input includes candidate age limits, gender, hometown exclusions, appearance, personality or similar personal traits, preserve them only in manual_review.
+23. "无需家务/不做家务" means Housekeeping Required=false or simply omit it; it must never reject a teacher.
+24. Job title such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 goes to Job Type only.
+25. Do not invent qualifications that are not stated.
+26. If input includes candidate age limits, gender, hometown exclusions, appearance, personality or similar personal traits, preserve them only in manual_review.
 
 EMPLOYER ORDER:
 {employer_request}
@@ -586,7 +591,7 @@ def normalize_requirement_group(group: Any) -> Tuple[Dict[str, Any], List[str]]:
         "Live-in Required", "Night Care Required", "Private Room Provided", "Driving Required",
         "Early Years Experience", "Montessori Experience", "International School Experience",
         "Kindergarten Experience", "High-end Family Experience", "Private Tutoring Experience",
-        "SEN / ADHD Experience", "Willing to Travel", "Cooking Required", "Baby Food Required",
+        "Nanny Educator Experience", "SEN / ADHD Experience", "Willing to Travel", "Cooking Required", "Baby Food Required",
         "Housekeeping Required", "School Pick-up Required", "Family-School Communication Required",
         "General Tutoring Experience", "Child Psychology Experience", "Luxury Hotel Experience",
         "Nutrition Planning",
@@ -801,6 +806,7 @@ FIELD_LABELS = {
     "Kindergarten Experience": "幼儿园工作经验",
     "High-end Family Experience": "高净值/高端家庭经验",
     "Private Tutoring Experience": "私人辅导经验",
+    "Nanny Educator Experience": "儿陪/育儿/教育管家上户经验",
     "SEN / ADHD Experience": "SEN/ADHD经验",
     "Willing to Travel": "可出差",
     "Cooking Required": "烹饪",
@@ -825,6 +831,7 @@ TEACHER_FIELD_MAP = {
     "Kindergarten Experience": "Kindergarten Experience",
     "High-end Family Experience": "High-end Family Experience",
     "Private Tutoring Experience": "Private Tutoring Experience",
+    "Nanny Educator Experience": "Nanny Educator Experience",
     "SEN / ADHD Experience": "SEN Experience",
     "Willing to Travel": "Willing to Travel",
     "Cooking Required": "Cooking",
@@ -861,13 +868,53 @@ def teacher_list(teacher: Dict[str, Any], field: str) -> List[str]:
     return normalize_multi_text(teacher.get(field))
 
 
-def match_boolean_teacher_field(teacher: Dict[str, Any], field: str, required: Any) -> str:
+def teacher_evidence_text(teacher: Dict[str, Any]) -> str:
+    """Build a conservative evidence string from resume-like Baserow fields.
+
+    This does NOT invent experience.  It only lets the matcher recognize explicit
+    words already present in profile / skills / certificates / subjects / notes.
+    """
+    fields = [
+        "Skills", "Certificates", "Qualifications", "Major", "University",
+        "Subjects", "Curriculum", "Experience Summary", "Profile", "Notes",
+        "Desired Position", "Current Position",
+    ]
+    parts: List[str] = []
+    for field in fields:
+        value = teacher.get(field)
+        if value is None or value == "":
+            continue
+        if isinstance(value, list):
+            parts.extend(str(x) for x in value if x not in (None, ""))
+        else:
+            parts.append(str(value))
+    return normalize_text(" | ".join(parts))
+
+
+def evidence_keyword_match(teacher: Dict[str, Any], keywords: Iterable[str]) -> bool:
+    haystack = teacher_evidence_text(teacher)
+    if not haystack:
+        return False
+    return any(normalize_text(keyword) in haystack for keyword in keywords)
+
+
+def match_boolean_teacher_field(
+    teacher: Dict[str, Any],
+    field: str,
+    required: Any,
+    *,
+    false_is_unknown: bool = False,
+) -> str:
     required_state = boolish(required)
     if required_state is not True:
-        # False generally means the service is not required; do not reject a teacher.
+        # Employer explicitly says a service is NOT required -> no restriction.
         return NOT_APPLICABLE
     actual = boolish(teacher.get(field))
     if actual is None:
+        return UNKNOWN
+    if actual is False and false_is_unknown:
+        # Experience checkboxes are often blank-by-default in Baserow.  For these
+        # fields, absence of evidence should be "待确认" rather than a hard conflict.
         return UNKNOWN
     return MATCH if actual is True else CONFLICT
 
@@ -964,21 +1011,54 @@ def evaluate_requirement(teacher: Dict[str, Any], field: str, expected: Any) -> 
 
     if field in TEACHER_FIELD_MAP:
         teacher_field = TEACHER_FIELD_MAP[field]
-        # Useful fallbacks for existing databases.
-        if field == "Early Years Experience" and teacher.get(teacher_field) in (None, ""):
+
+        # Conservative evidence fallbacks based on fields used in the Yan Li resume template.
+        if field == "Early Years Experience":
             subjects = {normalize_text(x) for x in teacher_list(teacher, "Subjects")}
-            if normalize_text("Early Years") in subjects:
+            if normalize_text("Early Years") in subjects or evidence_keyword_match(teacher, ["早教", "early years", "0-3岁"]):
                 return MATCH
-        if field == "Montessori Experience" and teacher.get(teacher_field) in (None, ""):
+
+        if field == "Montessori Experience":
             curriculum = {normalize_text(x) for x in teacher_list(teacher, "Curriculum")}
-            if normalize_text("Montessori") in curriculum:
+            if normalize_text("Montessori") in curriculum or evidence_keyword_match(teacher, ["蒙氏", "montessori"]):
                 return MATCH
-        if field == "General Tutoring Experience" and teacher.get(teacher_field) in (None, ""):
-            # Private tutoring is relevant evidence of tutoring, but not automatically proof of every subject.
+
+        if field == "General Tutoring Experience":
             fallback = boolish(teacher.get("Private Tutoring Experience"))
-            if fallback is True:
+            subjects = {normalize_text(x) for x in teacher_list(teacher, "Subjects")}
+            if fallback is True or normalize_text("Primary Education") in subjects or evidence_keyword_match(teacher, ["全科辅导", "课后辅导", "学习辅导"]):
                 return MATCH
-        return match_boolean_teacher_field(teacher, teacher_field, expected)
+
+        evidence_map = {
+            "Kindergarten Experience": ["幼儿园工作", "kindergarten"],
+            "High-end Family Experience": ["高净值家庭", "高端家庭", "private family"],
+            "Private Tutoring Experience": ["私人辅导", "家教", "private tutoring"],
+            "Nanny Educator Experience": ["教育管家", "儿陪师", "育儿师", "育婴师", "儿童陪伴", "nanny educator"],
+            "SEN / ADHD Experience": ["adhd", "sen", "特殊教育", "特殊需求"],
+            "Family-School Communication Required": ["家校沟通", "家校对接", "school communication"],
+            "Child Psychology Experience": ["心理学", "心理咨询师", "psychology", "psychological counselor"],
+            "Cooking Required": ["烹饪", "中餐", "西餐", "cooking"],
+            "Baby Food Required": ["辅食"],
+            "Housekeeping Required": ["家务", "收纳", "housekeeping"],
+            "Luxury Hotel Experience": ["星级酒店", "luxury hotel"],
+            "Nutrition Planning": ["营养搭配", "营养餐", "nutrition"],
+        }
+        if field in evidence_map and evidence_keyword_match(teacher, evidence_map[field]):
+            return MATCH
+
+        # Capabilities/availability where False is meaningful.
+        strict_false_fields = {
+            "Willing to Travel",
+        }
+        # Experience-style booleans: an unchecked/blank Baserow checkbox is treated
+        # as unknown, not as proof that the teacher lacks the experience.
+        false_is_unknown = field not in strict_false_fields
+        return match_boolean_teacher_field(
+            teacher,
+            teacher_field,
+            expected,
+            false_is_unknown=false_is_unknown,
+        )
 
     return UNKNOWN
 
@@ -1019,38 +1099,64 @@ def evaluate_child_age_reference(teacher: Dict[str, Any], reference: Dict[str, A
     return result
 
 
-def ratio(group: Dict[str, List[str]]) -> Optional[float]:
+def group_total(group: Dict[str, List[str]]) -> int:
+    return len(group[MATCH]) + len(group[CONFLICT]) + len(group[UNKNOWN])
+
+
+def hard_coverage_ratio(group: Dict[str, List[str]]) -> Optional[float]:
+    """For hard requirements, unknown data counts as not-yet-covered.
+
+    Example: 3 matched + 3 unknown = 50%, never 100%.
+    """
+    total = group_total(group)
+    if total == 0:
+        return None
+    return len(group[MATCH]) / total
+
+
+def known_quality_ratio(group: Dict[str, List[str]]) -> Optional[float]:
+    """For preferred/reference groups, score only evidence that is actually known."""
     known = len(group[MATCH]) + len(group[CONFLICT])
-    return (len(group[MATCH]) / known) if known else None
+    if known == 0:
+        return None
+    return len(group[MATCH]) / known
 
 
 def calculate_score(hard: Dict[str, List[str]], preferred: Dict[str, List[str]], reference: Dict[str, List[str]]) -> int:
-    weighted = []
-    for group, weight in [(hard, HARD_WEIGHT), (preferred, PREFERRED_WEIGHT), (reference, REFERENCE_WEIGHT)]:
-        r = ratio(group)
-        if r is not None:
-            weighted.append((r, weight))
+    weighted: List[Tuple[float, float]] = []
+
+    hard_ratio = hard_coverage_ratio(hard)
+    if hard_ratio is not None:
+        weighted.append((hard_ratio, HARD_WEIGHT))
+
+    preferred_ratio = known_quality_ratio(preferred)
+    if preferred_ratio is not None:
+        weighted.append((preferred_ratio, PREFERRED_WEIGHT))
+
+    reference_ratio = known_quality_ratio(reference)
+    if reference_ratio is not None:
+        weighted.append((reference_ratio, REFERENCE_WEIGHT))
+
     if not weighted:
         return 0
+
     total_weight = sum(weight for _, weight in weighted)
-    score = round(sum(r * weight for r, weight in weighted) / total_weight * 100)
-    if hard[CONFLICT]:
-        score = min(score, 79)
-    return score
+    return round(sum(ratio_value * weight for ratio_value, weight in weighted) / total_weight * 100)
 
 
 def hard_status(hard: Dict[str, List[str]]) -> Tuple[str, int]:
+    total = group_total(hard)
     if hard[CONFLICT]:
         return "conflict", 0
-    if hard[UNKNOWN]:
+    if total == 0 or hard[UNKNOWN]:
         return "pending", 1
     return "confirmed", 2
 
 
 def hard_confirmation_rate(hard: Dict[str, List[str]]) -> int:
-    total = len(hard[MATCH]) + len(hard[CONFLICT]) + len(hard[UNKNOWN])
+    total = group_total(hard)
     if total == 0:
-        return 100
+        return 0
     return round((len(hard[MATCH]) + len(hard[CONFLICT])) / total * 100)
 
 
@@ -1235,26 +1341,62 @@ def render_teacher_card(rank: int, item: Dict[str, Any]) -> None:
 
 
 def split_batch_orders(batch_text: str) -> List[str]:
-    """Split pasted recruitment messages into individual orders without using Gemini.
+    """Deterministically split pasted recruitment text BEFORE Gemini sees it.
 
-    The common source format repeats "沪上睿知派单中心" for every order, so that
-    marker is preferred. If it is not present, blank-line separation is used.
+    Priority:
+    1) repeated dispatch-center marker;
+    2) repeated explicit Order ID / Order Code anchors;
+    3) blank-line paragraphs;
+    4) otherwise treat as one order.
+
+    Gemini is never allowed to decide where one order ends and another begins.
     """
     text = str(batch_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
         return []
 
-    marker_parts = [
+    # 1. The most common real source supplied by the user.
+    dispatch_matches = list(re.finditer(r"(?=沪上睿知派单中心\s*[:：]?)", text))
+    if len(dispatch_matches) >= 2:
+        starts = [m.start() for m in dispatch_matches]
+        return [
+            text[starts[i] : starts[i + 1] if i + 1 < len(starts) else len(text)].strip()
+            for i in range(len(starts))
+            if text[starts[i] : starts[i + 1] if i + 1 < len(starts) else len(text)].strip()
+        ]
+
+    # 2. Structured copies such as 【订单编号】锦沐 / 订单编码: HXQ... / 编号：...
+    order_anchor = re.compile(
+        r"(?im)^(?=\s*(?:【\s*(?:订单\s*(?:编号|编码)|订单号|编号)\s*】|(?:订单\s*(?:编号|编码)|订单号|编号)\s*[:：]))"
+    )
+    anchor_matches = list(order_anchor.finditer(text))
+    if len(anchor_matches) >= 2:
+        starts = [m.start() for m in anchor_matches]
+        # Any introductory text before the first order-id line belongs to order 1.
+        starts[0] = 0
+        blocks = []
+        for i, start in enumerate(starts):
+            end = starts[i + 1] if i + 1 < len(starts) else len(text)
+            block = text[start:end].strip()
+            if block:
+                blocks.append(block)
+        return blocks
+
+    # 3. Explicit separators used by some recruiters.
+    separator_parts = [
         part.strip()
-        for part in re.split(r"(?=沪上睿知派单中心\s*[:：]?)", text)
+        for part in re.split(r"(?m)^\s*(?:={3,}|-{3,}|#{3,})\s*$", text)
         if part.strip()
     ]
-    if len(marker_parts) > 1:
-        return marker_parts
+    if len(separator_parts) > 1:
+        return separator_parts
 
+    # 4. Blank-line paragraphs are only trusted if they look like separate orders.
     blank_parts = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
     if len(blank_parts) > 1:
-        return blank_parts
+        orderish = re.compile(r"订单|薪资|工作地点|工作地址|城市|住家|育儿师|儿陪师|家庭教师|私人助理|家务师")
+        if sum(1 for part in blank_parts if orderish.search(part)) >= 2:
+            return blank_parts
 
     return [text]
 
@@ -1270,8 +1412,9 @@ You parse MULTIPLE private-family recruitment orders into structured JSON.
 Return JSON only. Do not include markdown.
 
 There are exactly {len(order_blocks)} numbered source orders below.
-Do not merge different orders. Do not invent extra orders.
-Return one object for each source order, using its exact Source Index.
+Each SOURCE ORDER block is already split by Python and is authoritative.
+Do not merge, split, reorder, or borrow any detail from another SOURCE ORDER.
+Return exactly {len(order_blocks)} objects, one per source order, using its exact Source Index.
 
 IMPORTANT EMPLOYMENT-SAFETY RULE:
 Candidate age, gender, nationality/hometown/regional exclusions, appearance, height/weight,
@@ -1321,6 +1464,7 @@ AUTOMATED MATCHING FIELDS ALLOWED IN hard_requirements / preferred_requirements:
 - Kindergarten Experience: boolean
 - High-end Family Experience: boolean
 - Private Tutoring Experience: boolean
+- Nanny Educator Experience: boolean
 - SEN / ADHD Experience: boolean
 - Willing to Travel: boolean
 - Cooking Required: boolean
@@ -1360,22 +1504,23 @@ INTERPRETATION RULES:
 7. 早教 / 0-3岁早教 -> Early Years Experience=true.
 8. 蒙氏 / Montessori -> Montessori Experience=true. If a Montessori certificate is explicitly required, add it to Required Certificates.
 9. 国际学校经历 -> International School Experience=true. A child merely attending an international school is only order context.
-10. 幼儿园工作经历 -> Kindergarten Experience=true.
-11. ADHD / SEN child -> SEN / ADHD Experience=true.
-12. 全科辅导 -> General Tutoring Experience=true.
-13. 家校对接 / 家校沟通 -> Family-School Communication Required=true.
-14. 开车接送 / 熟练驾驶 -> Driving Required=true. 接送孩子 -> School Pick-up Required=true when pickup is part of the job.
-15. 跟随老板出差 -> Willing to Travel=true.
-16. 辅食 -> Baby Food Required=true. 做饭/家常菜 -> Cooking Required=true. 家务/收纳 -> Housekeeping Required=true.
-17. 营养搭配 -> Nutrition Planning=true.
-18. 星级酒店从业经验 -> Luxury Hotel Experience=true.
-19. PET/KET/AP/SAT exam preparation -> Exam Preparation.
-20. IB/AP/IGCSE/A-Level familiarity -> Curriculum.
-21. "最好/优先/优先考虑" -> preferred_requirements. Explicit "要求/必须/需要" -> hard_requirements.
-22. "无需家务/不做家务" may be Housekeeping Required=false or omitted, and must never reject a teacher.
-23. Job title such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 goes to Job Type only.
-24. Do not invent qualifications not stated.
-25. Candidate age limits, gender, hometown exclusions, appearance, personality, and similar personal traits go only to manual_review.
+10. 幼儿园工作经历 -> Kindergarten Experience=true. If it says 幼儿园经历优先, put it in preferred_requirements.
+11. 有真实上户经历 / 陪伴师经历 / 儿陪师经历 / 育儿师经历 -> Nanny Educator Experience=true. If a number of years is stated, also set Minimum Years of Relevant Experience.
+12. ADHD / SEN child, when the teacher is expected to support that need -> SEN / ADHD Experience=true.
+13. 全科辅导 -> General Tutoring Experience=true.
+14. 家校对接 / 家校沟通 -> Family-School Communication Required=true.
+15. 开车接送 / 熟练驾驶 -> Driving Required=true. 接送孩子 -> School Pick-up Required=true when pickup is part of the job.
+16. 跟随老板出差 -> Willing to Travel=true.
+17. 辅食 -> Baby Food Required=true. 做饭/家常菜 -> Cooking Required=true. 家务/收纳 -> Housekeeping Required=true.
+18. 营养搭配 -> Nutrition Planning=true.
+19. 星级酒店从业经验 -> Luxury Hotel Experience=true.
+20. PET/KET/AP/SAT exam preparation -> Exam Preparation.
+21. IB/AP/IGCSE/A-Level familiarity -> Curriculum.
+22. "最好/优先/优先考虑" -> preferred_requirements. Explicit "要求/必须/需要" -> hard_requirements.
+23. "无需家务/不做家务" may be Housekeeping Required=false or omitted, and must never reject a teacher.
+24. Job title such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 goes to Job Type only.
+25. Do not invent qualifications not stated.
+26. Candidate age limits, gender, hometown exclusions, appearance, personality, and similar personal traits go only to manual_review.
 
 SOURCE ORDERS:
 {numbered_orders}
@@ -1472,11 +1617,11 @@ def estimated_batch_calls(order_count: int) -> int:
 
 
 def parse_employer_orders_batch(batch_text: str) -> List[Dict[str, Any]]:
-    """Parse many pasted orders in small Gemini chunks for reliability.
+    """Parse many orders after deterministic Python splitting.
 
-    A very large single JSON response is more likely to be truncated or to ignore
-    the requested wrapper.  We therefore parse at most BATCH_CHUNK_SIZE orders per
-    Gemini request, then merge the normalized results locally.
+    Every Gemini chunk must return exactly one object for every source block.
+    If the count/indexes do not match, the system stops instead of silently
+    merging employer orders.
     """
     order_blocks = split_batch_orders(batch_text)
     if not order_blocks:
@@ -1485,7 +1630,6 @@ def parse_employer_orders_batch(batch_text: str) -> List[Dict[str, Any]]:
         raise ValueError("一次最多建议解析 40 条订单，请分两批处理。")
 
     parsed_by_global_index: Dict[int, Dict[str, Any]] = {}
-    all_missing_indexes: List[int] = []
 
     for chunk_start in range(0, len(order_blocks), BATCH_CHUNK_SIZE):
         chunk_blocks = order_blocks[chunk_start : chunk_start + BATCH_CHUNK_SIZE]
@@ -1493,54 +1637,43 @@ def parse_employer_orders_batch(batch_text: str) -> List[Dict[str, Any]]:
         payload, model_used = generate_json_prompt(prompt)
         raw_orders = payload.get("orders", [])
 
-        if not isinstance(raw_orders, list) or not raw_orders:
+        if not isinstance(raw_orders, list):
+            raise RuntimeError("Gemini 批量返回的 orders 不是数组。")
+
+        expected_count = len(chunk_blocks)
+        if len(raw_orders) != expected_count:
             raise RuntimeError(
-                f"Gemini 第 {chunk_start // BATCH_CHUNK_SIZE + 1} 批没有返回可用的 orders 数组。"
+                f"为防止订单合并，本批次已停止：Python 拆出 {expected_count} 条，"
+                f"但 Gemini 返回 {len(raw_orders)} 条。请直接重新运行本批次。"
             )
 
-        parsed_local_indexes = set()
+        local_map: Dict[int, Dict[str, Any]] = {}
         for fallback_local_index, raw in enumerate(raw_orders, start=1):
             if not isinstance(raw, dict):
-                continue
+                raise RuntimeError("Gemini 返回了非对象订单，已停止以避免错单。")
 
             source_index_number = to_number(raw.get("Source Index"))
-            local_index = (
-                int(source_index_number)
-                if source_index_number is not None
-                else fallback_local_index
-            )
+            local_index = int(source_index_number) if source_index_number is not None else fallback_local_index
 
-            if local_index < 1 or local_index > len(chunk_blocks):
-                # If Gemini omitted/reset the source index strangely, use output order.
-                local_index = fallback_local_index
-            if local_index < 1 or local_index > len(chunk_blocks):
-                continue
+            if local_index < 1 or local_index > expected_count:
+                raise RuntimeError(f"Gemini 返回了无效 Source Index: {local_index}。")
+            if local_index in local_map:
+                raise RuntimeError(f"Gemini 重复返回 Source Index {local_index}，已停止以避免合并订单。")
+            local_map[local_index] = raw
 
+        expected_indexes = set(range(1, expected_count + 1))
+        if set(local_map) != expected_indexes:
+            raise RuntimeError("Gemini 返回的 Source Index 不完整，已停止以避免订单错位。")
+
+        for local_index in range(1, expected_count + 1):
             global_index = chunk_start + local_index
-            parsed_local_indexes.add(local_index)
             parsed_by_global_index[global_index] = normalize_parsed_order_from_raw(
-                raw=raw,
+                raw=local_map[local_index],
                 original_request=order_blocks[global_index - 1],
                 model_used=model_used,
             )
 
-        for local_index in range(1, len(chunk_blocks) + 1):
-            if local_index not in parsed_local_indexes:
-                all_missing_indexes.append(chunk_start + local_index)
-
-    parsed_orders = [
-        parsed_by_global_index[index]
-        for index in range(1, len(order_blocks) + 1)
-        if index in parsed_by_global_index
-    ]
-
-    if not parsed_orders:
-        raise RuntimeError("批量解析完成，但没有成功标准化任何订单。")
-
-    if all_missing_indexes:
-        warning = "Gemini 本次遗漏了源订单：" + ", ".join(str(x) for x in all_missing_indexes)
-        parsed_orders[0].setdefault("warnings", []).append(warning)
-
+    parsed_orders = [parsed_by_global_index[index] for index in range(1, len(order_blocks) + 1)]
     return parsed_orders
 
 
@@ -1734,7 +1867,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V1.4.1 · 单单 / 批量 / 老师反向匹配")
+    st.caption("V1.5 · 稳定拆单 / 岗位能力匹配 / 老师反向匹配")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -1880,8 +2013,8 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        f"一次粘贴多条订单。系统自动拆分，并按每批最多 {BATCH_CHUNK_SIZE} 条调用 Gemini，"
-        "之后每条订单与全部老师在 Python 本地匹配。"
+        f"一次粘贴多条订单。Python 先固定订单边界，再按每批最多 {BATCH_CHUNK_SIZE} 条调用 Gemini，"
+        "Gemini 只做结构化；之后每条订单与全部老师在 Python 本地匹配。"
     )
 
     batch_text = st.text_area(
@@ -2094,6 +2227,6 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V1.4 · 单个订单、批量订单、老师反向匹配。"
+    "Teacher Matching System V1.5 · 单个订单、批量订单、老师反向匹配。"
     "自动评分只使用岗位相关资格、能力与工作条件；个人属性要求仅供人工复核。"
 )
