@@ -1,9 +1,9 @@
 # ============================================================
-# AI Teacher Matching System V1.7
+# AI Teacher Matching System V1.8
 # Single-file Streamlit app
 #
 # Goals
-# - Support single-order, AI-normalized mixed-platform batch orders, and teacher-to-orders matching
+# - Support -order, AI-normalized mixed-platform batch orders, and teacher-to-orders matching
 # - Normalize mixed-platform employer text to a canonical editable order format before matching
 # - Read teachers from Baserow and rank them against one or many confirmed standard orders
 # - Match only job-relevant qualifications / work conditions
@@ -33,7 +33,7 @@ from google.genai import types
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V1.7",
+    page_title="AI Teacher Matching System V1.8",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -164,6 +164,8 @@ ALLOWED_MATCH_FIELDS = {
     "Teaching Languages",
     "Minimum Degree",
     "Minimum Years of Relevant Experience",
+    "Minimum Years of Teaching / Training Experience",
+    "Minimum Years of Nanny Educator Experience",
     "Subjects",
     "Curriculum",
     "Early Years Experience",
@@ -463,6 +465,7 @@ TOP-LEVEL JSON STRUCTURE:
   "hard_requirements": {{}},
   "preferred_requirements": {{}},
   "reference_requirements": {{}},
+  "compound_requirements": [],
   "manual_review": {{}}
 }}
 
@@ -475,6 +478,8 @@ AUTOMATED MATCHING FIELDS ALLOWED IN hard_requirements / preferred_requirements:
 - Teaching Languages: array
 - Minimum Degree: High School / Diploma / Associate Degree / Bachelor / Master / Doctorate
 - Minimum Years of Relevant Experience: number
+- Minimum Years of Teaching / Training Experience: number
+- Minimum Years of Nanny Educator Experience: number
 - Subjects: array
 - Curriculum: array
 - Early Years Experience: boolean
@@ -541,6 +546,60 @@ INTERPRETATION RULES:
 24. Job title such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 goes to Job Type only.
 25. Do not invent qualifications that are not stated.
 26. If input includes candidate age limits, gender, hometown exclusions, appearance, personality or similar personal traits, preserve them only in manual_review.
+
+COMBINATION-LOGIC RULES:
+- All ordinary fields inside hard_requirements are AND conditions by default.
+- Use compound_requirements ONLY when the employer explicitly gives alternatives or grouped logic such as "A或B", "A或者B", "A/B满足其一", "二选一", "任一即可".
+- One compound group has:
+  {{
+    "Label": "human-readable label",
+    "Logic": "OR" or "AND",
+    "Options": [
+      {{
+        "Label": "option label",
+        "Requirements": {{
+          "Allowed Field": value
+        }}
+      }}
+    ]
+  }}
+- Multiple fields inside ONE Option are AND conditions.
+- For an OR group, satisfying ANY one Option is enough.
+- Do not duplicate a condition in both hard_requirements and compound_requirements.
+
+IMPORTANT EXAMPLE:
+"5年以上教培经验或3年以上儿陪经验"
+must become:
+"compound_requirements": [
+  {{
+    "Label": "教培/儿陪经验",
+    "Logic": "OR",
+    "Options": [
+      {{
+        "Label": "5年以上教培经验",
+        "Requirements": {{
+          "Minimum Years of Teaching / Training Experience": 5
+        }}
+      }},
+      {{
+        "Label": "3年以上儿陪经验",
+        "Requirements": {{
+          "Nanny Educator Experience": true,
+          "Minimum Years of Nanny Educator Experience": 3
+        }}
+      }}
+    ]
+  }}
+]
+
+ANOTHER EXAMPLE:
+"有幼儿园经验或早教机构经验"
+must become one OR compound group with:
+- Option 1: Kindergarten Experience=true
+- Option 2: Early Years Experience=true
+
+For ordinary "英语流利且熟练驾驶", put BOTH Teaching Languages=["English"] and Driving Required=true
+in hard_requirements. That is already AND, so no compound group is needed.
 
 EMPLOYER ORDER:
 {employer_request}
@@ -681,6 +740,98 @@ def normalize_manual_review(value: Any) -> Dict[str, Any]:
     return result
 
 
+def normalize_compound_requirements(value: Any) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Normalize explicit OR / AND requirement groups.
+
+    Multiple fields inside one Option are AND conditions.
+    One compound group counts as ONE hard condition in scoring.
+    """
+    warnings: List[str] = []
+    normalized_groups: List[Dict[str, Any]] = []
+
+    if value is None or value == [] or value == {} or value == "":
+        return normalized_groups, warnings
+
+    if isinstance(value, dict):
+        raw_groups = [value]
+    elif isinstance(value, list):
+        raw_groups = value
+    else:
+        return [], ["compound_requirements 不是 list/dict，已忽略。"]
+
+    for group_index, raw_group in enumerate(raw_groups, start=1):
+        if not isinstance(raw_group, dict):
+            warnings.append(f"第 {group_index} 个组合条件不是 JSON object，已忽略。")
+            continue
+
+        label = str(
+            raw_group.get("Label")
+            or raw_group.get("label")
+            or f"组合条件 {group_index}"
+        ).strip()
+
+        logic = str(
+            raw_group.get("Logic")
+            or raw_group.get("logic")
+            or "OR"
+        ).strip().upper()
+
+        if logic not in {"OR", "AND"}:
+            warnings.append(f"组合条件「{label}」Logic={logic} 无法识别，已按 OR 处理。")
+            logic = "OR"
+
+        raw_options = raw_group.get("Options")
+        if raw_options is None:
+            raw_options = raw_group.get("options")
+
+        if not isinstance(raw_options, list) or not raw_options:
+            warnings.append(f"组合条件「{label}」没有有效 Options，已忽略。")
+            continue
+
+        options: List[Dict[str, Any]] = []
+
+        for option_index, raw_option in enumerate(raw_options, start=1):
+            if not isinstance(raw_option, dict):
+                warnings.append(f"组合条件「{label}」第 {option_index} 个 Option 不是 JSON object，已忽略。")
+                continue
+
+            option_label = str(
+                raw_option.get("Label")
+                or raw_option.get("label")
+                or f"选项 {option_index}"
+            ).strip()
+
+            requirements_raw = raw_option.get("Requirements")
+            if requirements_raw is None:
+                requirements_raw = raw_option.get("requirements")
+
+            if requirements_raw is None:
+                requirements_raw = {
+                    key: val
+                    for key, val in raw_option.items()
+                    if key not in {"Label", "label", "Requirements", "requirements"}
+                }
+
+            requirements, option_warnings = normalize_requirement_group(
+                requirements_raw if isinstance(requirements_raw, dict) else {}
+            )
+            warnings.extend([f"组合条件「{label}」/「{option_label}」：{item}" for item in option_warnings])
+
+            if not requirements:
+                warnings.append(f"组合条件「{label}」选项「{option_label}」没有可匹配条件，已忽略。")
+                continue
+
+            options.append({"Label": option_label, "Requirements": requirements})
+
+        if not options:
+            warnings.append(f"组合条件「{label}」没有有效选项，已忽略。")
+            continue
+
+        normalized_groups.append({"Label": label, "Logic": logic, "Options": options})
+
+    return normalized_groups, warnings
+
+
 def parse_employer_order(employer_request: str) -> Dict[str, Any]:
     request_text = str(employer_request or "").strip()
     if not request_text:
@@ -761,6 +912,7 @@ def parse_employer_order(employer_request: str) -> Dict[str, Any]:
     preferred, w2 = normalize_requirement_group(raw.get("preferred_requirements", {}))
     reference, w3 = normalize_reference_group(raw.get("reference_requirements", {}), order_info)
     manual_review = normalize_manual_review(raw.get("manual_review", {}))
+    compound_requirements, w4 = normalize_compound_requirements(raw.get("compound_requirements", []))
 
     # Ensure location/live-in context becomes job-relevant matching data.
     # V1.6 source-grounding: identifiers, cities, district, job type, and child ages
@@ -798,9 +950,10 @@ def parse_employer_order(employer_request: str) -> Dict[str, Any]:
         "hard_requirements": hard,
         "preferred_requirements": preferred,
         "reference_requirements": reference,
+        "compound_requirements": compound_requirements,
         "manual_review": manual_review,
         "raw_requirements": raw,
-        "warnings": w1 + w2 + w3,
+        "warnings": w1 + w2 + w3 + w4,
     }
 
 
@@ -822,6 +975,8 @@ FIELD_LABELS = {
     "Teaching Languages": "工作语言",
     "Minimum Degree": "最低学历",
     "Minimum Years of Relevant Experience": "最低相关经验年限",
+    "Minimum Years of Teaching / Training Experience": "最低教培/教学经验年限",
+    "Minimum Years of Nanny Educator Experience": "最低儿陪/教育管家经验年限",
     "Subjects": "教学/辅导方向",
     "Curriculum": "课程体系",
     "Early Years Experience": "早教经验",
@@ -870,7 +1025,12 @@ TEACHER_FIELD_MAP = {
 }
 
 
+COMPOUND_FIELD_PREFIX = "组合条件::"
+
+
 def field_label(field: str) -> str:
+    if str(field).startswith(COMPOUND_FIELD_PREFIX):
+        return str(field)[len(COMPOUND_FIELD_PREFIX):]
     return FIELD_LABELS.get(field, field)
 
 
@@ -1004,7 +1164,10 @@ def evaluate_requirement(teacher: Dict[str, Any], field: str, expected: Any) -> 
             return UNKNOWN
         return MATCH if DEGREE_RANK[actual] >= DEGREE_RANK[required] else CONFLICT
 
-    if field == "Minimum Years of Relevant Experience":
+    if field in {
+        "Minimum Years of Relevant Experience",
+        "Minimum Years of Teaching / Training Experience",
+    }:
         required = to_number(expected)
         actual = to_number(teacher.get("Years of Teaching"))
         if required is None:
@@ -1012,6 +1175,34 @@ def evaluate_requirement(teacher: Dict[str, Any], field: str, expected: Any) -> 
         if actual is None:
             return UNKNOWN
         return MATCH if actual >= required else CONFLICT
+
+    if field == "Minimum Years of Nanny Educator Experience":
+        required = to_number(expected)
+        if required is None:
+            return NOT_APPLICABLE
+
+        actual = None
+        for candidate_field in [
+            "Nanny Educator Years",
+            "Nanny Educator Experience Years",
+            "Years of Nanny Educator Experience",
+            "Years of Nanny Educator",
+        ]:
+            actual = to_number(teacher.get(candidate_field))
+            if actual is not None:
+                break
+
+        if actual is not None:
+            return MATCH if actual >= required else CONFLICT
+
+        nanny_state = boolish(teacher.get("Nanny Educator Experience"))
+        if nanny_state is True:
+            return UNKNOWN
+
+        if evidence_keyword_match(teacher, ["教育管家", "儿陪师", "陪伴师", "育儿师", "育婴师", "nanny educator"]):
+            return UNKNOWN
+
+        return UNKNOWN
 
     if field == "Subjects":
         return match_subset(teacher_list(teacher, "Subjects"), normalize_multi_text(expected))
@@ -1200,11 +1391,100 @@ def add_candidate_side_pending_checks(
             hard[UNKNOWN].append("Private Room Provided")
 
 
+def merge_outcome_groups(
+    target: Dict[str, List[str]],
+    source: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    for bucket in [MATCH, CONFLICT, UNKNOWN, NOT_APPLICABLE]:
+        for field in source.get(bucket, []):
+            if field not in target[bucket]:
+                target[bucket].append(field)
+    return target
+
+
+def option_outcome(teacher: Dict[str, Any], requirements: Dict[str, Any]) -> str:
+    evaluated = evaluate_group(teacher, requirements)
+    if evaluated[CONFLICT]:
+        return CONFLICT
+    if evaluated[UNKNOWN]:
+        return UNKNOWN
+    if evaluated[MATCH]:
+        return MATCH
+    return NOT_APPLICABLE
+
+
+def evaluate_compound_requirements(
+    teacher: Dict[str, Any],
+    groups: Any,
+) -> Tuple[Dict[str, List[str]], List[Dict[str, Any]]]:
+    """Evaluate explicit OR/AND groups as one hard condition per group."""
+    result = {MATCH: [], CONFLICT: [], UNKNOWN: [], NOT_APPLICABLE: []}
+    details: List[Dict[str, Any]] = []
+    normalized_groups, _warnings = normalize_compound_requirements(groups)
+
+    for index, group in enumerate(normalized_groups, start=1):
+        label = str(group.get("Label") or f"组合条件 {index}").strip()
+        logic = str(group.get("Logic") or "OR").upper()
+        options = group.get("Options", [])
+
+        option_results: List[Dict[str, Any]] = []
+        outcomes: List[str] = []
+
+        for option in options:
+            requirements = option.get("Requirements", {})
+            outcome = option_outcome(teacher, requirements)
+            outcomes.append(outcome)
+            option_results.append({
+                "Label": option.get("Label") or "选项",
+                "Outcome": outcome,
+                "Requirements": requirements,
+            })
+
+        usable = [value for value in outcomes if value != NOT_APPLICABLE]
+
+        if not usable:
+            group_outcome = NOT_APPLICABLE
+        elif logic == "AND":
+            if CONFLICT in usable:
+                group_outcome = CONFLICT
+            elif UNKNOWN in usable:
+                group_outcome = UNKNOWN
+            elif all(value == MATCH for value in usable):
+                group_outcome = MATCH
+            else:
+                group_outcome = UNKNOWN
+        else:
+            if MATCH in usable:
+                group_outcome = MATCH
+            elif UNKNOWN in usable:
+                group_outcome = UNKNOWN
+            elif all(value == CONFLICT for value in usable):
+                group_outcome = CONFLICT
+            else:
+                group_outcome = UNKNOWN
+
+        synthetic_field = COMPOUND_FIELD_PREFIX + label
+        result[group_outcome].append(synthetic_field)
+        details.append({
+            "Label": label,
+            "Logic": logic,
+            "Outcome": group_outcome,
+            "Options": option_results,
+        })
+
+    return result, details
+
+
 def match_teacher(
     teacher: Dict[str, Any],
     parsed: Dict[str, Any],
 ) -> Dict[str, Any]:
     hard = evaluate_group(teacher, parsed.get("hard_requirements", {}))
+    compound_hard, compound_details = evaluate_compound_requirements(
+        teacher, parsed.get("compound_requirements", [])
+    )
+    hard = merge_outcome_groups(hard, compound_hard)
+
     preferred = evaluate_group(teacher, parsed.get("preferred_requirements", {}))
     reference = evaluate_child_age_reference(teacher, parsed.get("reference_requirements", {}))
     add_candidate_side_pending_checks(teacher, parsed.get("order_info", {}), parsed.get("hard_requirements", {}), hard)
@@ -1231,6 +1511,7 @@ def match_teacher(
         "hard": hard,
         "preferred": preferred,
         "reference": reference,
+        "compound_details": compound_details,
         "reasons": reasons[:8],
     }
 
@@ -1269,6 +1550,30 @@ def render_requirement_group(title: str, group: Dict[str, Any]) -> None:
         return
     for field, value in group.items():
         st.write(f"**{field_label(field)}：** {requirement_value(value)}")
+
+
+def render_compound_requirements(groups: Any) -> None:
+    normalized_groups, warnings = normalize_compound_requirements(groups)
+    st.markdown("#### 组合条件（OR / AND）")
+    if not normalized_groups:
+        st.caption("无")
+        return
+
+    for group_index, group in enumerate(normalized_groups, start=1):
+        label = group.get("Label") or f"组合条件 {group_index}"
+        logic = group.get("Logic") or "OR"
+        st.write(f"**{label}｜{logic}**")
+        for option_index, option in enumerate(group.get("Options", []), start=1):
+            option_label = option.get("Label") or f"选项 {option_index}"
+            reqs = option.get("Requirements", {})
+            parts = [
+                f"{field_label(field)}={requirement_value(value)}"
+                for field, value in reqs.items()
+            ]
+            st.write(f"• {option_label}: " + (" + ".join(parts) if parts else "无可匹配字段"))
+
+    for warning in warnings:
+        st.warning(warning)
 
 
 def render_order_info(info: Dict[str, Any]) -> None:
@@ -1698,6 +2003,7 @@ RETURN THIS TOP-LEVEL STRUCTURE:
       "hard_requirements": {{}},
       "preferred_requirements": {{}},
       "reference_requirements": {{}},
+      "compound_requirements": [],
       "manual_review": {{}}
     }}
   ]
@@ -1712,6 +2018,8 @@ AUTOMATED MATCHING FIELDS ALLOWED IN hard_requirements / preferred_requirements:
 - Teaching Languages: array
 - Minimum Degree: High School / Diploma / Associate Degree / Bachelor / Master / Doctorate
 - Minimum Years of Relevant Experience: number
+- Minimum Years of Teaching / Training Experience: number
+- Minimum Years of Nanny Educator Experience: number
 - Subjects: array
 - Curriculum: array
 - Early Years Experience: boolean
@@ -1777,6 +2085,60 @@ INTERPRETATION RULES:
 24. Job title such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 goes to Job Type only.
 25. Do not invent qualifications not stated.
 26. Candidate age limits, gender, hometown exclusions, appearance, personality, and similar personal traits go only to manual_review.
+
+COMBINATION-LOGIC RULES:
+- All ordinary fields inside hard_requirements are AND conditions by default.
+- Use compound_requirements ONLY when the employer explicitly gives alternatives or grouped logic such as "A或B", "A或者B", "A/B满足其一", "二选一", "任一即可".
+- One compound group has:
+  {{
+    "Label": "human-readable label",
+    "Logic": "OR" or "AND",
+    "Options": [
+      {{
+        "Label": "option label",
+        "Requirements": {{
+          "Allowed Field": value
+        }}
+      }}
+    ]
+  }}
+- Multiple fields inside ONE Option are AND conditions.
+- For an OR group, satisfying ANY one Option is enough.
+- Do not duplicate a condition in both hard_requirements and compound_requirements.
+
+IMPORTANT EXAMPLE:
+"5年以上教培经验或3年以上儿陪经验"
+must become:
+"compound_requirements": [
+  {{
+    "Label": "教培/儿陪经验",
+    "Logic": "OR",
+    "Options": [
+      {{
+        "Label": "5年以上教培经验",
+        "Requirements": {{
+          "Minimum Years of Teaching / Training Experience": 5
+        }}
+      }},
+      {{
+        "Label": "3年以上儿陪经验",
+        "Requirements": {{
+          "Nanny Educator Experience": true,
+          "Minimum Years of Nanny Educator Experience": 3
+        }}
+      }}
+    ]
+  }}
+]
+
+ANOTHER EXAMPLE:
+"有幼儿园经验或早教机构经验"
+must become one OR compound group with:
+- Option 1: Kindergarten Experience=true
+- Option 2: Early Years Experience=true
+
+For ordinary "英语流利且熟练驾驶", put BOTH Teaching Languages=["English"] and Driving Required=true
+in hard_requirements. That is already AND, so no compound group is needed.
 
 SOURCE ORDERS:
 {numbered_orders}
@@ -1847,8 +2209,9 @@ def normalize_parsed_order_from_raw(
     preferred, w2 = normalize_requirement_group(raw.get("preferred_requirements", {}))
     reference, w3 = normalize_reference_group(raw.get("reference_requirements", {}), order_info)
     manual_review = normalize_manual_review(raw.get("manual_review", {}))
+    compound_requirements, w4 = normalize_compound_requirements(raw.get("compound_requirements", []))
 
-    # V1.6 source-grounding: identifiers, cities, district, job type, and child ages
+    # Source-grounding: identifiers, cities, district, job type, and child ages
     # are taken from the isolated source block whenever Python can read them directly.
     # This prevents cross-order contamination even if Gemini accidentally borrows a detail.
     source_order_id = extract_source_order_id(original_request)
@@ -1883,9 +2246,10 @@ def normalize_parsed_order_from_raw(
         "hard_requirements": hard,
         "preferred_requirements": preferred,
         "reference_requirements": reference,
+        "compound_requirements": compound_requirements,
         "manual_review": manual_review,
         "raw_requirements": raw,
-        "warnings": w1 + w2 + w3,
+        "warnings": w1 + w2 + w3 + w4,
     }
 
 
@@ -1953,6 +2317,7 @@ RETURN EXACTLY:
       "hard_requirements": {{}},
       "preferred_requirements": {{}},
       "reference_requirements": {{}},
+      "compound_requirements": [],
       "manual_review": {{}}
     }}
   ]
@@ -1967,6 +2332,8 @@ AUTOMATED MATCHING FIELDS ALLOWED in hard_requirements / preferred_requirements:
 - Teaching Languages: array
 - Minimum Degree: High School / Diploma / Associate Degree / Bachelor / Master / Doctorate
 - Minimum Years of Relevant Experience: number
+- Minimum Years of Teaching / Training Experience: number
+- Minimum Years of Nanny Educator Experience: number
 - Subjects: array
 - Curriculum: array
 - Early Years Experience: boolean
@@ -2034,6 +2401,60 @@ INTERPRETATION RULES:
 25. Candidate age limits, gender, hometown exclusions, appearance and personality go only to manual_review.
 26. Do not invent qualifications not stated.
 
+COMBINATION-LOGIC RULES:
+- All ordinary fields inside hard_requirements are AND conditions by default.
+- Use compound_requirements ONLY when the employer explicitly gives alternatives or grouped logic such as "A或B", "A或者B", "A/B满足其一", "二选一", "任一即可".
+- One compound group has:
+  {{
+    "Label": "human-readable label",
+    "Logic": "OR" or "AND",
+    "Options": [
+      {{
+        "Label": "option label",
+        "Requirements": {{
+          "Allowed Field": value
+        }}
+      }}
+    ]
+  }}
+- Multiple fields inside ONE Option are AND conditions.
+- For an OR group, satisfying ANY one Option is enough.
+- Do not duplicate a condition in both hard_requirements and compound_requirements.
+
+IMPORTANT EXAMPLE:
+"5年以上教培经验或3年以上儿陪经验"
+must become:
+"compound_requirements": [
+  {{
+    "Label": "教培/儿陪经验",
+    "Logic": "OR",
+    "Options": [
+      {{
+        "Label": "5年以上教培经验",
+        "Requirements": {{
+          "Minimum Years of Teaching / Training Experience": 5
+        }}
+      }},
+      {{
+        "Label": "3年以上儿陪经验",
+        "Requirements": {{
+          "Nanny Educator Experience": true,
+          "Minimum Years of Nanny Educator Experience": 3
+        }}
+      }}
+    ]
+  }}
+]
+
+ANOTHER EXAMPLE:
+"有幼儿园经验或早教机构经验"
+must become one OR compound group with:
+- Option 1: Kindergarten Experience=true
+- Option 2: Early Years Experience=true
+
+For ordinary "英语流利且熟练驾驶", put BOTH Teaching Languages=["English"] and Driving Required=true
+in hard_requirements. That is already AND, so no compound group is needed.
+
 RAW MIXED-PLATFORM EMPLOYER TEXT:
 {raw_text}
 """
@@ -2087,6 +2508,7 @@ def canonical_order_payload(parsed: Dict[str, Any], index: int) -> Dict[str, Any
         "hard_requirements": parsed.get("hard_requirements", {}),
         "preferred_requirements": parsed.get("preferred_requirements", {}),
         "reference_requirements": parsed.get("reference_requirements", {}),
+        "compound_requirements": parsed.get("compound_requirements", []),
         "manual_review": parsed.get("manual_review", {}),
     }
 
@@ -2177,6 +2599,7 @@ def standardized_preview_rows(parsed_orders: List[Dict[str, Any]]) -> List[Dict[
                 "孩子年龄": format_list(info.get("Child Ages")),
                 "薪资": info.get("Salary Text") or "未填写",
                 "硬条件数": len(parsed.get("hard_requirements", {})),
+                "组合条件数": len(parsed.get("compound_requirements", [])),
                 "人工复核项": len(parsed.get("manual_review", {})),
             }
         )
@@ -2364,6 +2787,10 @@ def render_parsed_order_compact(parsed: Dict[str, Any]) -> None:
         with r:
             render_requirement_group("参考条件", parsed.get("reference_requirements", {}))
 
+    compound = parsed.get("compound_requirements", [])
+    if compound:
+        render_compound_requirements(compound)
+
     manual = parsed.get("manual_review", {})
     if manual:
         st.warning("以下内容只供人工复核，不参与自动匹配：")
@@ -2466,7 +2893,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V1.7 · AI统一订单格式 / 人工确认 / 本地匹配")
+    st.caption("V1.8 · AI统一订单格式 / 组合条件 / 人工确认 / 本地匹配")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -2507,7 +2934,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V1.7：不同平台原始订单 → AI统一标准格式 → 人工确认 → Python本地匹配。</div>',
+    '<div class="main-subtitle">V1.8：不同平台原始订单 → AI统一标准格式 → OR/AND组合条件 → 人工确认 → Python本地匹配。</div>',
     unsafe_allow_html=True,
 )
 
@@ -2528,7 +2955,7 @@ mode = st.radio(
 
 if mode == "① 单个订单 → 匹配全部老师":
     st.markdown('<div class="section-title">单个订单匹配</div>', unsafe_allow_html=True)
-    st.caption("粘贴 1 条订单。Gemini 解析 1 次，然后本地 Python 与 Baserow 中全部老师匹配。")
+    st.caption("粘贴 1 条订单。Gemini 解析 1 次，并识别 A或B / A且B 等组合条件，然后本地 Python 与 Baserow 中全部老师匹配。")
 
     example = (
         "订单编码：HXC20260806688 北京朝阳区（住家）儿陪师。"
@@ -2613,8 +3040,8 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V1.7 使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式；"
-        "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。"
+        "V1.8 使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件。"
     )
 
     st.markdown("### 第一步：粘贴不同平台的原始雇主需求")
@@ -2968,6 +3395,6 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V1.7 · AI统一订单格式、人工确认、标准订单池、单单/批量/老师反向匹配。"
-    "自动评分只使用岗位相关资格、能力与工作条件；个人属性要求仅供人工复核。"
+    "Teacher Matching System V1.8 · AI统一订单格式、人工确认、标准订单池、单单/批量/老师反向匹配。"
+    "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；个人属性要求仅供人工复核。"
 )
