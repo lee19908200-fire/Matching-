@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V1.5
+# AI Teacher Matching System V1.6
 # Single-file Streamlit app
 #
 # Goals
@@ -32,7 +32,7 @@ from google.genai import types
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V1.5",
+    page_title="AI Teacher Matching System V1.6",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -762,8 +762,31 @@ def parse_employer_order(employer_request: str) -> Dict[str, Any]:
     manual_review = normalize_manual_review(raw.get("manual_review", {}))
 
     # Ensure location/live-in context becomes job-relevant matching data.
-    if order_info.get("Working Cities") and "Working Cities" not in hard:
+    # V1.6 source-grounding: identifiers, cities, district, job type, and child ages
+    # are taken from the isolated source block whenever Python can read them directly.
+    # This prevents cross-order contamination even if Gemini accidentally borrows a detail.
+    source_order_id = extract_source_order_id(original_request)
+    source_cities = extract_source_cities(original_request)
+    source_child_ages = extract_source_child_ages(original_request)
+    source_job_type = extract_source_job_type(original_request)
+    source_district = extract_source_district(original_request)
+
+    if source_order_id:
+        order_info["Order ID"] = source_order_id
+    if source_job_type:
+        order_info["Job Type"] = source_job_type
+    if source_district:
+        order_info["Job District"] = source_district
+    if source_cities:
+        order_info["Working Cities"] = source_cities
+        hard["Working Cities"] = source_cities
+    elif order_info.get("Working Cities") and "Working Cities" not in hard:
         hard["Working Cities"] = order_info["Working Cities"]
+
+    if source_child_ages:
+        order_info["Child Ages"] = source_child_ages
+        reference["Child Ages"] = source_child_ages
+
     if order_info.get("Live-in Job") is True and "Live-in Required" not in hard:
         hard["Live-in Required"] = True
 
@@ -942,8 +965,11 @@ def evaluate_requirement(teacher: Dict[str, Any], field: str, expected: Any) -> 
         norm_preferred = {normalize_text(x) for x in preferred}
         if normalize_text("Any City") in norm_preferred:
             return MATCH
-        # Relocation orders such as Changsha -> Singapore require willingness for all listed cities.
-        return MATCH if {normalize_text(x) for x in required}.issubset(norm_preferred) else CONFLICT
+        # Multiple cities in one order are treated as acceptable / sequential work locations.
+        # A teacher only needs at least one city overlap here. If the family truly requires
+        # relocation across every listed city, the recruiter should confirm that manually.
+        required_norm = {normalize_text(x) for x in required}
+        return MATCH if required_norm.intersection(norm_preferred) else CONFLICT
 
     if field == "Live-in Required":
         return match_boolean_teacher_field(teacher, "Live-in", expected)
@@ -1340,66 +1366,295 @@ def render_teacher_card(rank: int, item: Dict[str, Any]) -> None:
 # ============================================================
 
 
-def split_batch_orders(batch_text: str) -> List[str]:
-    """Deterministically split pasted recruitment text BEFORE Gemini sees it.
+def extract_source_order_id(text: str) -> Optional[str]:
+    """Extract an explicit recruiter order ID from the source text itself.
 
-    Priority:
-    1) repeated dispatch-center marker;
-    2) repeated explicit Order ID / Order Code anchors;
-    3) blank-line paragraphs;
-    4) otherwise treat as one order.
-
-    Gemini is never allowed to decide where one order ends and another begins.
+    Source text wins over Gemini for this field because order IDs are identifiers,
+    not semantic interpretations.
     """
-    text = str(batch_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    source = str(text or "")
+    patterns = [
+        r"【\s*(?:订单\s*(?:编号|编码)|订单号|编号)\s*】\s*[:：]?\s*([^\s，,；;。\n]+)",
+        r"(?:订单\s*(?:编号|编码)|订单号|编号)\s*[:：]\s*([^\s，,；;。\n]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, source, flags=re.IGNORECASE)
+        if match:
+            value = match.group(1).strip("：:[]【】()（）")
+            if value:
+                return value
+
+    # Recruiter codes often appear without an explicit label.
+    code_match = re.search(r"\b(?:HX[CWQG]|HG|ZJS)[A-Z0-9ⅩX-]{5,}\b", source, flags=re.IGNORECASE)
+    if code_match:
+        return code_match.group(0).strip()
+    return None
+
+
+def extract_source_cities(text: str) -> List[str]:
+    """Find standardized cities that are literally present in one source block."""
+    source = str(text or "")
+    found: List[Tuple[int, str]] = []
+    for alias, standard in CITY_ALIASES.items():
+        # Ignore wildcard aliases for source location extraction.
+        if standard == "Any City":
+            continue
+        for match in re.finditer(re.escape(alias), source, flags=re.IGNORECASE):
+            found.append((match.start(), standard))
+        # Also accept the standardized English name when recruiters paste bilingual text.
+        if normalize_text(alias) != normalize_text(standard):
+            for match in re.finditer(re.escape(standard), source, flags=re.IGNORECASE):
+                found.append((match.start(), standard))
+    found.sort(key=lambda pair: pair[0])
+    return dedupe([standard for _, standard in found])
+
+
+def extract_source_child_ages(text: str) -> List[float]:
+    """Conservatively extract CHILD ages from source text.
+
+    Candidate age limits such as "40岁以内" are intentionally excluded.
+    """
+    source = str(text or "")
+    child_words = ("宝", "宝宝", "孩子", "男孩", "女孩", "男宝", "女宝", "哥哥", "妹妹", "学生", "儿童")
+    candidate_words = ("老师", "阿姨", "育儿师", "陪伴师", "儿陪师", "家务师", "年龄", "周岁以内", "周岁以下")
+    results: List[float] = []
+
+    age_pattern = re.compile(
+        r"(?P<years>\d+(?:\.\d+)?)\s*岁(?:\s*(?P<half>半)|\s*(?P<months>\d+)\s*个?月)?|(?P<onlymonths>\d+(?:\.\d+)?)\s*个?月(?!份)"
+    )
+    for match in age_pattern.finditer(source):
+        left = max(0, match.start() - 14)
+        right = min(len(source), match.end() + 14)
+        window = source[left:right]
+        if not any(word in window for word in child_words):
+            continue
+        if any(word in window for word in candidate_words) and not any(
+            word in window for word in ("宝宝", "孩子", "男孩", "女孩", "男宝", "女宝", "学生")
+        ):
+            continue
+        immediate_after = source[match.end() : match.end() + 6]
+        if re.match(r"\s*(?:以内|以下|以上|之间)", immediate_after):
+            continue
+
+        # A months-only age should be close to a child noun; this avoids
+        # treating phrases such as "9月份入学" as a 9-month-old child.
+        if match.group("onlymonths") is not None:
+            near = source[max(0, match.start() - 8) : min(len(source), match.end() + 8)]
+            if not any(word in near for word in child_words):
+                continue
+            age = float(match.group("onlymonths")) / 12.0
+        else:
+            age = float(match.group("years"))
+            if match.group("half"):
+                age += 0.5
+            if match.group("months"):
+                age += float(match.group("months")) / 12.0
+        results.append(round(age, 2))
+    return dedupe(results)
+
+
+def extract_source_job_type(text: str) -> Optional[str]:
+    source = str(text or "")
+    job_types = [
+        "私人助理", "家庭教师", "蒙氏老师", "教育管家", "高端家务师",
+        "儿陪师", "住家陪伴师", "陪伴师", "育儿师", "育婴师", "家务师", "家教",
+    ]
+    for job_type in job_types:
+        if job_type in source:
+            return job_type
+    return None
+
+
+def extract_source_district(text: str) -> Optional[str]:
+    source = str(text or "")
+    # Prefer labelled address/district text.
+    labelled = re.search(
+        r"(?:地址|工作地点|工作地址|区域)\s*[:：]?\s*[^\n]{0,25}?([\u4e00-\u9fff]{2,8}(?:区|县))",
+        source,
+    )
+    if labelled:
+        return labelled.group(1)
+
+    generic = re.search(r"([\u4e00-\u9fff]{2,8}(?:区|县))", source)
+    return generic.group(1) if generic else None
+
+
+def source_block_complete(text: str) -> bool:
+    """Heuristic: has enough independent evidence to represent a full order."""
+    source = str(text or "")
+    if len(source.strip()) < 25:
+        return False
+    score = 0
+    if extract_source_cities(source) or re.search(r"工作(?:地点|地址)|城市\s*[:：]", source):
+        score += 1
+    if extract_source_job_type(source) or re.search(r"工作内容|内容\s*[:：]", source):
+        score += 1
+    if re.search(
+        r"工作要求|老师要求|要求\s*[:：]|备注【|备注\s*[:：]|"
+        r"岁以内|岁以下|本科|专科|硕士|研究生|英语|口语|驾驶|会开车|经验",
+        source,
+    ):
+        score += 1
+    if re.search(r"薪资|工资|待遇|\b\d{4,6}\s*[-~～—–]\s*\d{4,6}\b", source):
+        score += 1
+    if extract_source_order_id(source):
+        score += 1
+    if re.search(r"上户时间|到岗时间|随时上户|合适即上户|立即上户|尽快", source):
+        score += 1
+    return score >= 3
+
+
+def line_looks_like_new_order(line: str, current_text: str) -> bool:
+    """Return True only for a strong order-start line after a complete prior order."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    # Repeated recruiter header is always a new order once prior content exists.
+    if re.search(r"沪上睿知派单中心\s*[:：]?", stripped):
+        return bool(current_text.strip())
+
+    # Strong hype / new-order markers used by recruiter groups.
+    if re.match(r"^(?:十万火急|神仙级雇主|急急急|急单|新单|好单|推荐好单|🔥|🌈)", stripped):
+        return source_block_complete(current_text)
+
+    explicit_id = bool(
+        re.search(
+            r"(?:【\s*(?:订单\s*(?:编号|编码)|订单号|编号)\s*】|(?:订单\s*(?:编号|编码)|订单号|编号)\s*[:：])",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+    )
+    code_near_start = bool(
+        re.match(r"^\s*(?:HX[CWQG]|HG|ZJS)[A-Z0-9ⅩX-]{5,}", stripped, flags=re.IGNORECASE)
+    )
+
+    # Salary lines are often the first line of a fresh recruiter order.
+    salary_start = bool(re.match(r"^\s*(?:薪资|工资|待遇)\s*[:：]", stripped))
+
+    # Location + living arrangement + role headline is another common order start.
+    city_headline = bool(extract_source_cities(stripped)) and bool(
+        re.search(r"住家|不住家|白班|育儿师|育婴师|儿陪师|陪伴师|家庭教师|家务师|私人助理|家教", stripped)
+    )
+
+    if not source_block_complete(current_text):
+        return False
+
+    if explicit_id or code_near_start:
+        return True
+    if salary_start and (extract_source_order_id(stripped) or city_headline):
+        return True
+    if city_headline and len(stripped) >= 16:
+        return True
+    return False
+
+
+def split_batch_orders(batch_text: str) -> List[str]:
+    """Deterministically split messy recruiter text BEFORE Gemini sees it.
+
+    V1.6 uses a line-state machine instead of a single regex. It supports mixed
+    formats where some orders have IDs, some start with salary, and some start
+    with hype/location headlines. Gemini never decides order boundaries.
+    """
+    text = (
+        str(batch_text or "")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\u200b", "")
+        .strip()
+    )
     if not text:
         return []
 
-    # 1. The most common real source supplied by the user.
-    dispatch_matches = list(re.finditer(r"(?=沪上睿知派单中心\s*[:：]?)", text))
-    if len(dispatch_matches) >= 2:
-        starts = [m.start() for m in dispatch_matches]
-        return [
-            text[starts[i] : starts[i + 1] if i + 1 < len(starts) else len(text)].strip()
-            for i in range(len(starts))
-            if text[starts[i] : starts[i + 1] if i + 1 < len(starts) else len(text)].strip()
-        ]
-
-    # 2. Structured copies such as 【订单编号】锦沐 / 订单编码: HXQ... / 编号：...
-    order_anchor = re.compile(
-        r"(?im)^(?=\s*(?:【\s*(?:订单\s*(?:编号|编码)|订单号|编号)\s*】|(?:订单\s*(?:编号|编码)|订单号|编号)\s*[:：]))"
-    )
-    anchor_matches = list(order_anchor.finditer(text))
-    if len(anchor_matches) >= 2:
-        starts = [m.start() for m in anchor_matches]
-        # Any introductory text before the first order-id line belongs to order 1.
-        starts[0] = 0
+    # First handle repeated dispatch-center markers even when they are pasted
+    # in a long paragraph rather than on their own lines.
+    dispatch_positions = [m.start() for m in re.finditer(r"(?=沪上睿知派单中心\s*[:：]?)", text)]
+    if len(dispatch_positions) >= 2:
         blocks = []
-        for i, start in enumerate(starts):
-            end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        prefix = text[: dispatch_positions[0]].strip()
+        for index, start in enumerate(dispatch_positions):
+            end = dispatch_positions[index + 1] if index + 1 < len(dispatch_positions) else len(text)
             block = text[start:end].strip()
+            if index == 0 and prefix:
+                block = f"{prefix}\n{block}".strip()
             if block:
                 blocks.append(block)
         return blocks
 
-    # 3. Explicit separators used by some recruiters.
-    separator_parts = [
-        part.strip()
-        for part in re.split(r"(?m)^\s*(?:={3,}|-{3,}|#{3,})\s*$", text)
-        if part.strip()
-    ]
-    if len(separator_parts) > 1:
-        return separator_parts
+    lines = text.split("\n")
+    blocks: List[str] = []
+    current: List[str] = []
 
-    # 4. Blank-line paragraphs are only trusted if they look like separate orders.
-    blank_parts = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
-    if len(blank_parts) > 1:
-        orderish = re.compile(r"订单|薪资|工作地点|工作地址|城市|住家|育儿师|儿陪师|家庭教师|私人助理|家务师")
-        if sum(1 for part in blank_parts if orderish.search(part)) >= 2:
-            return blank_parts
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        current_text = "\n".join(current).strip()
 
-    return [text]
+        if line_looks_like_new_order(line, current_text):
+            if current_text:
+                blocks.append(current_text)
+            current = [line]
+            continue
 
+        # Separator lines can finish a complete order.
+        if re.match(r"^\s*(?:={3,}|-{3,}|#{3,})\s*$", line):
+            if current_text and source_block_complete(current_text):
+                blocks.append(current_text)
+                current = []
+            continue
+
+        current.append(line)
+
+    tail = "\n".join(current).strip()
+    if tail:
+        blocks.append(tail)
+
+    # Second pass: if a block still contains more than one explicit order ID,
+    # split at later ID lines only when the preceding segment already looks complete.
+    refined: List[str] = []
+    for block in blocks:
+        sublines = block.split("\n")
+        subcurrent: List[str] = []
+        for line in sublines:
+            before = "\n".join(subcurrent).strip()
+            explicit_id = bool(
+                re.search(
+                    r"(?:【\s*(?:订单\s*(?:编号|编码)|订单号|编号)\s*】|(?:订单\s*(?:编号|编码)|订单号|编号)\s*[:：])",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+            )
+            if explicit_id and before and extract_source_order_id(before) and source_block_complete(before):
+                refined.append(before)
+                subcurrent = [line]
+            else:
+                subcurrent.append(line)
+        remainder = "\n".join(subcurrent).strip()
+        if remainder:
+            refined.append(remainder)
+
+    return [block for block in refined if block.strip()]
+
+
+def order_block_preview(block: str, index: int) -> Dict[str, Any]:
+    cities = extract_source_cities(block)
+    ages = extract_source_child_ages(block)
+    first_lines = [line.strip() for line in block.splitlines() if line.strip()]
+    snippet = " / ".join(first_lines[:2])
+    if len(snippet) > 90:
+        snippet = snippet[:90] + "…"
+    return {
+        "序号": index,
+        "订单编号": extract_source_order_id(block) or "未识别",
+        "城市": ", ".join(cities) if cities else "待 Gemini 识别",
+        "岗位": extract_source_job_type(block) or "待 Gemini 识别",
+        "孩子年龄": ", ".join(str(x) for x in ages) if ages else "待 Gemini 识别",
+        "字符数": len(block),
+        "原文开头": snippet,
+    }
+
+
+def preview_order_blocks(blocks: List[str]) -> List[Dict[str, Any]]:
+    return [order_block_preview(block, index) for index, block in enumerate(blocks, start=1)]
 
 def build_batch_parser_prompt(order_blocks: List[str]) -> str:
     numbered_orders = "\n\n".join(
@@ -1592,8 +1847,31 @@ def normalize_parsed_order_from_raw(
     reference, w3 = normalize_reference_group(raw.get("reference_requirements", {}), order_info)
     manual_review = normalize_manual_review(raw.get("manual_review", {}))
 
-    if order_info.get("Working Cities") and "Working Cities" not in hard:
+    # V1.6 source-grounding: identifiers, cities, district, job type, and child ages
+    # are taken from the isolated source block whenever Python can read them directly.
+    # This prevents cross-order contamination even if Gemini accidentally borrows a detail.
+    source_order_id = extract_source_order_id(original_request)
+    source_cities = extract_source_cities(original_request)
+    source_child_ages = extract_source_child_ages(original_request)
+    source_job_type = extract_source_job_type(original_request)
+    source_district = extract_source_district(original_request)
+
+    if source_order_id:
+        order_info["Order ID"] = source_order_id
+    if source_job_type:
+        order_info["Job Type"] = source_job_type
+    if source_district:
+        order_info["Job District"] = source_district
+    if source_cities:
+        order_info["Working Cities"] = source_cities
+        hard["Working Cities"] = source_cities
+    elif order_info.get("Working Cities") and "Working Cities" not in hard:
         hard["Working Cities"] = order_info["Working Cities"]
+
+    if source_child_ages:
+        order_info["Child Ages"] = source_child_ages
+        reference["Child Ages"] = source_child_ages
+
     if order_info.get("Live-in Job") is True and "Live-in Required" not in hard:
         hard["Live-in Required"] = True
 
@@ -1867,7 +2145,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V1.5 · 稳定拆单 / 岗位能力匹配 / 老师反向匹配")
+    st.caption("V1.6 · 强制拆单预览 / 岗位能力匹配 / 老师反向匹配")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -1896,7 +2174,7 @@ with st.sidebar:
     st.divider()
     st.info(
         "单个订单模式：1 次 Gemini 请求。\n\n"
-        f"批量模式：每批最多 {BATCH_CHUNK_SIZE} 条订单，按批调用 Gemini。\n\n"
+        f"批量模式：先免费预览拆单，再按每批最多 {BATCH_CHUNK_SIZE} 条调用 Gemini。\n\n"
         "老师反向匹配如果复用最近批量解析结果：0 次新的 Gemini 请求。"
     )
 
@@ -1907,7 +2185,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V1.4.1：修复多订单 JSON，并支持稳定分批解析。</div>',
+    '<div class="main-subtitle">V1.6：Python 强制拆单预览 + 来源字段校验 + 批量/反向共用解析结果。</div>',
     unsafe_allow_html=True,
 )
 
@@ -2013,8 +2291,8 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        f"一次粘贴多条订单。Python 先固定订单边界，再按每批最多 {BATCH_CHUNK_SIZE} 条调用 Gemini，"
-        "Gemini 只做结构化；之后每条订单与全部老师在 Python 本地匹配。"
+        f"一次粘贴多条订单。Python 先强制拆单并预览，再按每批最多 {BATCH_CHUNK_SIZE} 条调用 Gemini。"
+        "订单编号、城市、区域、岗位和孩子年龄会再用原始订单校验；之后才与全部老师本地匹配。"
     )
 
     batch_text = st.text_area(
@@ -2032,9 +2310,21 @@ elif mode == "② 批量订单 → 每单推荐老师":
     if detected_blocks:
         estimated_calls = estimated_batch_calls(len(detected_blocks))
         st.info(
-            f"当前自动识别到 **{len(detected_blocks)} 条订单**；"
-            f"预计使用 **{estimated_calls} 次 Gemini 请求**。"
+            f"Python 当前强制拆出 **{len(detected_blocks)} 条订单**；"
+            f"预计使用 **{estimated_calls} 次 Gemini 请求**。请先看下面的拆单预览，再开始正式匹配。"
         )
+        st.markdown("#### 拆单预览（此处尚未调用 Gemini）")
+        st.dataframe(
+            preview_order_blocks(detected_blocks),
+            use_container_width=True,
+            hide_index=True,
+        )
+        with st.expander("逐条查看 Python 拆出的原始订单"):
+            for preview_index, preview_block in enumerate(detected_blocks, start=1):
+                st.markdown(f"**订单 {preview_index}**")
+                st.text(preview_block)
+                if preview_index < len(detected_blocks):
+                    st.divider()
 
     c1, c2 = st.columns([1, 3])
     with c1:
@@ -2142,9 +2432,21 @@ else:
         blocks = split_batch_orders(reverse_text) if reverse_text.strip() else []
         if blocks:
             st.info(
-                f"当前自动识别到 **{len(blocks)} 条订单**；"
+                f"Python 当前强制拆出 **{len(blocks)} 条订单**；"
                 f"本次预计使用 **{estimated_batch_calls(len(blocks))} 次 Gemini 请求**。"
             )
+            st.markdown("#### 拆单预览（尚未调用 Gemini）")
+            st.dataframe(
+                preview_order_blocks(blocks),
+                use_container_width=True,
+                hide_index=True,
+            )
+            with st.expander("逐条查看 Python 拆出的原始订单"):
+                for preview_index, preview_block in enumerate(blocks, start=1):
+                    st.markdown(f"**订单 {preview_index}**")
+                    st.text(preview_block)
+                    if preview_index < len(blocks):
+                        st.divider()
 
     b1, b2 = st.columns([4, 1])
     with b1:
@@ -2227,6 +2529,6 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V1.5 · 单个订单、批量订单、老师反向匹配。"
+    "Teacher Matching System V1.6 · 强制拆单预览、单个订单、批量订单、老师反向匹配。"
     "自动评分只使用岗位相关资格、能力与工作条件；个人属性要求仅供人工复核。"
 )
