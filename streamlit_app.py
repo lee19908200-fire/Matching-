@@ -1,9 +1,9 @@
 # ============================================================
-# AI Teacher Matching System V1.4
+# AI Teacher Matching System V1.4.1
 # Single-file Streamlit app
 #
 # Goals
-# - Support single-order, batch-order, and teacher-to-orders matching
+# - Support single-order, reliable chunked batch-order, and teacher-to-orders matching
 # - Read teachers from Baserow and rank them against one or many orders
 # - Match only job-relevant qualifications / work conditions
 # - Keep candidate age, gender, nationality/hometown and appearance
@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -30,7 +31,7 @@ from google.genai import types
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V1.4",
+    page_title="AI Teacher Matching System V1.4.1",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -76,6 +77,7 @@ BASEROW_BASE_URL = "https://api.baserow.io"
 BASEROW_PAGE_SIZE = 200
 REQUEST_TIMEOUT = 30
 TOP_N = 10
+BATCH_CHUNK_SIZE = 8
 
 HARD_WEIGHT = 0.70
 PREFERRED_WEIGHT = 0.20
@@ -540,9 +542,37 @@ EMPLOYER ORDER:
 
 
 def clean_json_text(text: str) -> str:
-    cleaned = str(text or "").replace("```json", "").replace("```JSON", "").replace("```", "").strip()
-    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-    return match.group(0) if match else cleaned
+    """Remove markdown fences / leading prose while preserving JSON object OR array.
+
+    V1.4 used a ``{.*}`` regex.  When Gemini returned a top-level JSON array
+    such as ``[{...}, {...}]``, that regex removed the square brackets and
+    produced invalid JSON.  This version keeps the original top-level JSON
+    container.
+    """
+    cleaned = (
+        str(text or "")
+        .replace("```json", "")
+        .replace("```JSON", "")
+        .replace("```", "")
+        .strip()
+    )
+    if not cleaned:
+        return cleaned
+
+    object_pos = cleaned.find("{")
+    array_pos = cleaned.find("[")
+    starts = [pos for pos in (object_pos, array_pos) if pos >= 0]
+    if not starts:
+        return cleaned
+
+    start = min(starts)
+    opening = cleaned[start]
+    closing = "}" if opening == "{" else "]"
+    end = cleaned.rfind(closing)
+    if end < start:
+        # Keep the content so json.loads can raise a useful decode error.
+        return cleaned[start:]
+    return cleaned[start : end + 1]
 
 
 def normalize_requirement_group(group: Any) -> Tuple[Dict[str, Any], List[str]]:
@@ -650,6 +680,14 @@ def parse_employer_order(employer_request: str) -> Dict[str, Any]:
     if not request_text:
         raise ValueError("请输入一条雇主订单。")
 
+    # Save Gemini quota when the single-order box clearly contains many orders.
+    detected_orders = split_batch_orders(request_text)
+    if len(detected_orders) > 1:
+        raise ValueError(
+            f"单单匹配框里检测到 {len(detected_orders)} 条订单。"
+            "请切换到『② 批量订单 → 每单推荐老师』后再粘贴。"
+        )
+
     client = gemini_client()
     prompt = build_parser_prompt(request_text)
 
@@ -683,7 +721,34 @@ def parse_employer_order(employer_request: str) -> Dict[str, Any]:
     try:
         raw = json.loads(clean_json_text(response.text))
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Gemini 返回内容不是有效 JSON：{response.text[:1200]}") from exc
+        raise RuntimeError(
+            "Gemini 返回的 JSON 不完整或格式异常。请重新运行一次；"
+            "如果粘贴的是多条订单，请使用批量匹配模式。"
+        ) from exc
+
+    # Gemini occasionally returns a top-level array even when ONE object was requested.
+    if isinstance(raw, list):
+        if len(raw) == 1 and isinstance(raw[0], dict):
+            raw = raw[0]
+        elif len(raw) > 1:
+            raise ValueError(
+                f"Gemini 在单单模式中识别出了 {len(raw)} 条订单。"
+                "请切换到『② 批量订单 → 每单推荐老师』。"
+            )
+
+    # Also tolerate the batch wrapper when it contains exactly one order.
+    if isinstance(raw, dict) and isinstance(raw.get("orders"), list):
+        wrapped_orders = raw.get("orders", [])
+        if len(wrapped_orders) == 1 and isinstance(wrapped_orders[0], dict):
+            raw = wrapped_orders[0]
+        elif len(wrapped_orders) > 1:
+            raise ValueError(
+                f"Gemini 在单单模式中识别出了 {len(wrapped_orders)} 条订单。"
+                "请切换到『② 批量订单 → 每单推荐老师』。"
+            )
+
+    if not isinstance(raw, dict):
+        raise RuntimeError("Gemini 单单解析返回的顶层内容不是 JSON object。")
 
     order_info = normalize_order_info(raw.get("order_info"))
     hard, w1 = normalize_requirement_group(raw.get("hard_requirements", {}))
@@ -1318,7 +1383,11 @@ SOURCE ORDERS:
 
 
 def generate_json_prompt(prompt: str) -> Tuple[Dict[str, Any], str]:
-    """Run one Gemini JSON generation call with the same model fallback as single mode."""
+    """Run one Gemini JSON generation call with model fallback.
+
+    Batch mode accepts both the requested ``{"orders": [...]}`` wrapper and a
+    bare top-level array, because Gemini may occasionally omit the wrapper.
+    """
     client = gemini_client()
 
     def generate(model_name: str):
@@ -1350,10 +1419,18 @@ def generate_json_prompt(prompt: str) -> Tuple[Dict[str, Any], str]:
     try:
         payload = json.loads(clean_json_text(response.text))
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Gemini 返回内容不是有效 JSON：{response.text[:1200]}") from exc
+        raise RuntimeError(
+            "Gemini 本批次返回的 JSON 不完整或格式异常。"
+            "系统已限制每批订单数量；请重新运行一次。"
+        ) from exc
+
+    if isinstance(payload, list):
+        payload = {"orders": payload}
+    elif isinstance(payload, dict) and "orders" not in payload and "order_info" in payload:
+        payload = {"orders": [payload]}
 
     if not isinstance(payload, dict):
-        raise RuntimeError("Gemini 批量解析返回的顶层内容不是 JSON object。")
+        raise RuntimeError("Gemini 批量解析返回的顶层内容不是 JSON object 或 array。")
 
     return payload, model_used
 
@@ -1388,42 +1465,80 @@ def normalize_parsed_order_from_raw(
     }
 
 
+def estimated_batch_calls(order_count: int) -> int:
+    if order_count <= 0:
+        return 0
+    return math.ceil(order_count / BATCH_CHUNK_SIZE)
+
+
 def parse_employer_orders_batch(batch_text: str) -> List[Dict[str, Any]]:
-    """Parse many pasted orders in ONE Gemini generate_content request."""
+    """Parse many pasted orders in small Gemini chunks for reliability.
+
+    A very large single JSON response is more likely to be truncated or to ignore
+    the requested wrapper.  We therefore parse at most BATCH_CHUNK_SIZE orders per
+    Gemini request, then merge the normalized results locally.
+    """
     order_blocks = split_batch_orders(batch_text)
     if not order_blocks:
         raise ValueError("请先粘贴雇主订单。")
     if len(order_blocks) > 40:
         raise ValueError("一次最多建议解析 40 条订单，请分两批处理。")
 
-    prompt = build_batch_parser_prompt(order_blocks)
-    payload, model_used = generate_json_prompt(prompt)
-    raw_orders = payload.get("orders", [])
+    parsed_by_global_index: Dict[int, Dict[str, Any]] = {}
+    all_missing_indexes: List[int] = []
 
-    if not isinstance(raw_orders, list) or not raw_orders:
-        raise RuntimeError("Gemini 没有返回可用的 orders 数组。")
+    for chunk_start in range(0, len(order_blocks), BATCH_CHUNK_SIZE):
+        chunk_blocks = order_blocks[chunk_start : chunk_start + BATCH_CHUNK_SIZE]
+        prompt = build_batch_parser_prompt(chunk_blocks)
+        payload, model_used = generate_json_prompt(prompt)
+        raw_orders = payload.get("orders", [])
 
-    parsed_by_index: Dict[int, Dict[str, Any]] = {}
-    for fallback_index, raw in enumerate(raw_orders, start=1):
-        if not isinstance(raw, dict):
-            continue
-        source_index_number = to_number(raw.get("Source Index"))
-        source_index = int(source_index_number) if source_index_number is not None else fallback_index
-        if source_index < 1 or source_index > len(order_blocks):
-            continue
-        parsed_by_index[source_index] = normalize_parsed_order_from_raw(
-            raw=raw,
-            original_request=order_blocks[source_index - 1],
-            model_used=model_used,
-        )
+        if not isinstance(raw_orders, list) or not raw_orders:
+            raise RuntimeError(
+                f"Gemini 第 {chunk_start // BATCH_CHUNK_SIZE + 1} 批没有返回可用的 orders 数组。"
+            )
 
-    parsed_orders = [parsed_by_index[index] for index in sorted(parsed_by_index)]
+        parsed_local_indexes = set()
+        for fallback_local_index, raw in enumerate(raw_orders, start=1):
+            if not isinstance(raw, dict):
+                continue
+
+            source_index_number = to_number(raw.get("Source Index"))
+            local_index = (
+                int(source_index_number)
+                if source_index_number is not None
+                else fallback_local_index
+            )
+
+            if local_index < 1 or local_index > len(chunk_blocks):
+                # If Gemini omitted/reset the source index strangely, use output order.
+                local_index = fallback_local_index
+            if local_index < 1 or local_index > len(chunk_blocks):
+                continue
+
+            global_index = chunk_start + local_index
+            parsed_local_indexes.add(local_index)
+            parsed_by_global_index[global_index] = normalize_parsed_order_from_raw(
+                raw=raw,
+                original_request=order_blocks[global_index - 1],
+                model_used=model_used,
+            )
+
+        for local_index in range(1, len(chunk_blocks) + 1):
+            if local_index not in parsed_local_indexes:
+                all_missing_indexes.append(chunk_start + local_index)
+
+    parsed_orders = [
+        parsed_by_global_index[index]
+        for index in range(1, len(order_blocks) + 1)
+        if index in parsed_by_global_index
+    ]
+
     if not parsed_orders:
         raise RuntimeError("批量解析完成，但没有成功标准化任何订单。")
 
-    missing_indexes = [index for index in range(1, len(order_blocks) + 1) if index not in parsed_by_index]
-    if missing_indexes:
-        warning = "Gemini 本次遗漏了源订单：" + ", ".join(str(x) for x in missing_indexes)
+    if all_missing_indexes:
+        warning = "Gemini 本次遗漏了源订单：" + ", ".join(str(x) for x in all_missing_indexes)
         parsed_orders[0].setdefault("warnings", []).append(warning)
 
     return parsed_orders
@@ -1573,9 +1688,15 @@ def reverse_summary_rows(reverse_results: List[Dict[str, Any]]) -> List[Dict[str
 
 def render_api_error(exc: Exception) -> None:
     text = str(exc)
-    if "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in text.lower() or "rate limit" in text.lower():
+    lower = text.lower()
+    if "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in lower or "rate limit" in lower:
         st.error("Gemini API 当前额度已达到限制。")
         st.warning("请等待额度恢复或调整 Gemini API 计费/额度后再次运行。Baserow 老师数据不受影响。")
+    elif isinstance(exc, ValueError):
+        st.warning(text)
+    elif "json" in lower and ("gemini" in lower or "格式" in text or "不完整" in text):
+        st.error("Gemini 返回的结构化结果不完整。")
+        st.info("请重新运行一次。批量模式会自动分成小批次解析，避免一次返回太长导致 JSON 截断。")
     else:
         st.error("处理过程中发生错误。")
         st.exception(exc)
@@ -1613,7 +1734,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V1.4 · 单单 / 批量 / 老师反向匹配")
+    st.caption("V1.4.1 · 单单 / 批量 / 老师反向匹配")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -1642,7 +1763,7 @@ with st.sidebar:
     st.divider()
     st.info(
         "单个订单模式：1 次 Gemini 请求。\n\n"
-        "批量模式：多条订单合并为 1 次 Gemini 请求。\n\n"
+        f"批量模式：每批最多 {BATCH_CHUNK_SIZE} 条订单，按批调用 Gemini。\n\n"
         "老师反向匹配如果复用最近批量解析结果：0 次新的 Gemini 请求。"
     )
 
@@ -1653,7 +1774,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V1.4：单个订单、批量派单、指定老师反向找订单。</div>',
+    '<div class="main-subtitle">V1.4.1：修复多订单 JSON，并支持稳定分批解析。</div>',
     unsafe_allow_html=True,
 )
 
@@ -1759,8 +1880,8 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "一次粘贴多条订单。系统先自动拆分，再用 1 次 Gemini 请求批量结构化，"
-        "之后每条订单与全部老师本地匹配。"
+        f"一次粘贴多条订单。系统自动拆分，并按每批最多 {BATCH_CHUNK_SIZE} 条调用 Gemini，"
+        "之后每条订单与全部老师在 Python 本地匹配。"
     )
 
     batch_text = st.text_area(
@@ -1776,7 +1897,11 @@ elif mode == "② 批量订单 → 每单推荐老师":
 
     detected_blocks = split_batch_orders(batch_text) if batch_text.strip() else []
     if detected_blocks:
-        st.info(f"当前自动识别到 **{len(detected_blocks)} 条订单**。")
+        estimated_calls = estimated_batch_calls(len(detected_blocks))
+        st.info(
+            f"当前自动识别到 **{len(detected_blocks)} 条订单**；"
+            f"预计使用 **{estimated_calls} 次 Gemini 请求**。"
+        )
 
     c1, c2 = st.columns([1, 3])
     with c1:
@@ -1800,7 +1925,7 @@ elif mode == "② 批量订单 → 每单推荐老师":
             st.warning("请先粘贴多条订单。")
         else:
             try:
-                with st.spinner("Gemini 正在一次性解析全部订单，然后批量匹配老师..."):
+                with st.spinner("Gemini 正在分批解析订单，然后批量匹配老师..."):
                     parsed_orders = parse_employer_orders_batch(batch_text)
                     bundle = run_batch_matching(teachers, parsed_orders, top_k=batch_top_k)
                     st.session_state["batch_parsed_orders"] = parsed_orders
@@ -1821,7 +1946,7 @@ elif mode == "② 批量订单 → 每单推荐老师":
         with m2:
             st.metric("老师数据库", len(teachers))
         with m3:
-            st.metric("本次 Gemini 生成请求", "1 次")
+            st.metric("本次 Gemini 生成请求", f"{estimated_batch_calls(len(batch_parsed_orders))} 次")
 
     if batch_bundle:
         st.markdown("### 批量推荐总览")
@@ -1883,7 +2008,10 @@ else:
         )
         blocks = split_batch_orders(reverse_text) if reverse_text.strip() else []
         if blocks:
-            st.info(f"当前自动识别到 **{len(blocks)} 条订单**。本次点击后会使用 1 次 Gemini 生成请求。")
+            st.info(
+                f"当前自动识别到 **{len(blocks)} 条订单**；"
+                f"本次预计使用 **{estimated_batch_calls(len(blocks))} 次 Gemini 请求**。"
+            )
 
     b1, b2 = st.columns([4, 1])
     with b1:
@@ -1909,7 +2037,7 @@ else:
                         st.warning("请先粘贴订单，或者勾选使用最近一次批量订单。")
                         parsed_orders = []
                     else:
-                        with st.spinner("Gemini 正在一次性解析全部订单..."):
+                        with st.spinner("Gemini 正在分批解析全部订单..."):
                             parsed_orders = parse_employer_orders_batch(reverse_text)
 
                 if parsed_orders:
