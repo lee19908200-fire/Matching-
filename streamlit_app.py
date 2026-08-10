@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V1.9
+# AI Teacher Matching System V2.0
 # Single-file Streamlit app
 #
 # Goals
@@ -36,7 +36,7 @@ from google.genai import types
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V1.9",
+    page_title="AI Teacher Matching System V2.0",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -464,7 +464,8 @@ TOP-LEVEL JSON STRUCTURE:
     "Live-in Job": null,
     "Child Ages": [],
     "Child Count": null,
-    "Special Needs": []
+    "Special Needs": [],
+    "Job Duties": []
   }},
   "hard_requirements": {{}},
   "preferred_requirements": {{}},
@@ -550,7 +551,8 @@ INTERPRETATION RULES:
     Explicit "要求/必须/需要/工作内容必须完成" -> hard_requirements.
 23. "无需家务/不做家务" means Housekeeping Required=false or simply omit it; it must never reject a teacher.
 24. Job title such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 goes to Job Type only.
-25. Do not invent qualifications that are not stated.
+25. Extract concrete day-to-day duties stated by the employer into order_info["Job Duties"] as short factual phrases, e.g. 学习辅导, 家校沟通, 开车接送, 早教启蒙, 家庭事务统筹. Do not invent duties.
+26. Do not invent qualifications that are not stated.
 26. If input includes candidate age limits, gender, hometown exclusions, appearance, personality or similar personal traits, preserve them only in manual_review.
 
 COMBINATION-LOGIC RULES:
@@ -736,6 +738,7 @@ def normalize_order_info(info: Any) -> Dict[str, Any]:
         "Child Ages": [x for x in ages if x is not None],
         "Child Count": int(to_number(info.get("Child Count"))) if to_number(info.get("Child Count")) is not None else None,
         "Special Needs": normalize_multi_text(info.get("Special Needs")),
+        "Job Duties": normalize_multi_text(info.get("Job Duties")),
     }
 
 
@@ -1651,6 +1654,7 @@ def render_order_info(info: Dict[str, Any]) -> None:
         "孩子年龄": format_list(info.get("Child Ages")),
         "孩子数量": info.get("Child Count"),
         "特殊需求": format_list(info.get("Special Needs")),
+        "主要工作内容": format_list(info.get("Job Duties")),
     }
     for label, value in display.items():
         if value not in (None, "", "未填写"):
@@ -2077,7 +2081,8 @@ RETURN THIS TOP-LEVEL STRUCTURE:
         "Live-in Job": null,
         "Child Ages": [],
         "Child Count": null,
-        "Special Needs": []
+        "Special Needs": [],
+        "Job Duties": []
       }},
       "hard_requirements": {{}},
       "preferred_requirements": {{}},
@@ -2164,7 +2169,8 @@ INTERPRETATION RULES:
 22. "最好/优先/优先考虑" -> preferred_requirements. Explicit "要求/必须/需要" -> hard_requirements.
 23. "无需家务/不做家务" may be Housekeeping Required=false or omitted, and must never reject a teacher.
 24. Job title such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 goes to Job Type only.
-25. Do not invent qualifications not stated.
+25. Extract concrete day-to-day duties into order_info["Job Duties"] as short factual phrases. Do not invent duties.
+26. Do not invent qualifications not stated.
 26. Candidate age limits, gender, hometown exclusions, appearance, personality, and similar personal traits go only to manual_review.
 
 COMBINATION-LOGIC RULES:
@@ -2393,7 +2399,8 @@ RETURN EXACTLY:
         "Live-in Job": null,
         "Child Ages": [],
         "Child Count": null,
-        "Special Needs": []
+        "Special Needs": [],
+        "Job Duties": []
       }},
       "hard_requirements": {{}},
       "preferred_requirements": {{}},
@@ -2481,8 +2488,9 @@ INTERPRETATION RULES:
 22. "最好/优先/优先考虑" -> preferred_requirements; explicit "要求/必须/需要" -> hard_requirements.
 23. "无需家务/不做家务" may be Housekeeping Required=false or omitted; it must never reject a teacher.
 24. Job titles such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 go to Job Type only.
-25. Candidate age limits, gender, hometown exclusions, appearance and personality go only to manual_review.
-26. Do not invent qualifications not stated.
+25. Extract concrete day-to-day duties into order_info["Job Duties"] as short factual phrases. Do not invent duties.
+26. Candidate age limits, gender, hometown exclusions, appearance and personality go only to manual_review.
+27. Do not invent qualifications not stated.
 
 COMBINATION-LOGIC RULES:
 - All ordinary fields inside hard_requirements are AND conditions by default.
@@ -2961,6 +2969,268 @@ def render_api_error(exc: Exception) -> None:
         st.exception(exc)
 
 
+
+# ============================================================
+# 8C. V2.0 JOB-TARGETED RESUME OPTIMIZER
+# ============================================================
+
+
+def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a conservative, job-relevant fact payload for resume tailoring.
+
+    We intentionally exclude internal IDs and avoid using candidate age, gender,
+    nationality/hometown or appearance as tailoring signals.  If those facts are
+    already present in a pasted original resume, Gemini is told not to emphasize,
+    hide, or alter them to satisfy employer preferences.
+    """
+    excluded = {
+        "Baserow ID", "Age", "Birth Date", "Date of Birth", "DOB", "Gender",
+        "Nationality", "Hometown", "Height", "Weight", "Photo", "Image",
+    }
+    result: Dict[str, Any] = {}
+    for key, value in teacher.items():
+        if str(key).startswith("_") or key in excluded:
+            continue
+        if value is None or value == "" or value == [] or value == {}:
+            continue
+        result[str(key)] = value
+    return result
+
+
+def teacher_resume_source_hint(teacher: Dict[str, Any]) -> str:
+    """Prefill the resume editor only when Baserow already contains resume-like text."""
+    preferred_fields = [
+        "Full Resume", "Resume", "CV", "Resume Text", "Original Resume",
+        "Experience Summary", "Profile", "Biography", "Bio", "Notes",
+    ]
+    sections: List[str] = []
+    for field in preferred_fields:
+        value = teacher.get(field)
+        if value is None or value == "" or value == []:
+            continue
+        if isinstance(value, list):
+            body = "\n".join(str(x) for x in value if x not in (None, ""))
+        else:
+            body = str(value).strip()
+        if body:
+            sections.append(f"【{field}】\n{body}")
+    return "\n\n".join(sections).strip()
+
+
+def safe_order_payload_for_resume(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """Only job-relevant order content is sent as tailoring criteria.
+
+    manual_review is deliberately excluded so age/gender/hometown/appearance
+    preferences cannot drive resume optimization.
+    """
+    info = dict(parsed.get("order_info", {}) or {})
+    return {
+        "order_info": info,
+        "hard_requirements": parsed.get("hard_requirements", {}) or {},
+        "preferred_requirements": parsed.get("preferred_requirements", {}) or {},
+        "reference_requirements": parsed.get("reference_requirements", {}) or {},
+        "compound_requirements": parsed.get("compound_requirements", []) or [],
+    }
+
+
+def collect_available_standard_orders() -> List[Dict[str, Any]]:
+    """Collect current confirmed/parsed orders from the session and deduplicate them."""
+    candidates: List[Dict[str, Any]] = []
+
+    for parsed in st.session_state.get("batch_parsed_orders") or []:
+        if isinstance(parsed, dict):
+            candidates.append(parsed)
+
+    reverse_orders = st.session_state.get("reverse_parsed_orders") or []
+    for parsed in reverse_orders:
+        if isinstance(parsed, dict):
+            candidates.append(parsed)
+
+    single = st.session_state.get("single_parsed_order")
+    if isinstance(single, dict):
+        candidates.append(single)
+
+    unique: List[Dict[str, Any]] = []
+    seen = set()
+    for parsed in candidates:
+        payload = safe_order_payload_for_resume(parsed)
+        key = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(parsed)
+    return unique
+
+
+def build_resume_optimizer_prompt(
+    teacher: Dict[str, Any],
+    parsed_order: Dict[str, Any],
+    original_resume: str,
+    supplemental_employer_text: str,
+) -> str:
+    teacher_payload = teacher_job_relevant_profile(teacher)
+    order_payload = safe_order_payload_for_resume(parsed_order)
+
+    # Keep prompts bounded on Community Cloud / Gemini free tiers.
+    resume_text = str(original_resume or "").strip()[:30000]
+    employer_text = str(supplemental_employer_text or "").strip()[:12000]
+
+    return f"""
+You are a factual resume editor for a private-family education / childcare recruitment system.
+Create a JOB-TARGETED resume version for ONE teacher and ONE employer order.
+Return JSON only. No markdown fences and no prose outside JSON.
+
+NON-NEGOTIABLE FACTUALITY RULES:
+1. You may reorganize, shorten, rewrite, and emphasize facts that are explicitly supported by either:
+   A) STRUCTURED TEACHER FACTS, or
+   B) ORIGINAL TEACHER RESUME.
+2. NEVER invent or upgrade employment dates, employer names, job titles, duties, years of experience,
+   degree, school, major, certificates, curriculum knowledge, SEN/ADHD experience, Montessori experience,
+   language level, driving ability, visa/work authorization, night care, cooking, childcare or any other skill.
+3. A job requirement is NOT evidence that the teacher has that capability.
+4. If evidence is missing or ambiguous, do NOT write the claim into the tailored resume. Put it in
+   questions_to_confirm and mark the requirement evidence as "missing" or "partial".
+5. Do not convert a visa into work authorization. Do not convert "serving a child who attends an
+   international school" into "worked as an international-school teacher". Do not infer IB/AP/etc.
+6. Do not turn IELTS / conversational English into "full English teaching" unless the source explicitly supports it.
+7. Preserve chronology and factual dates. You may reorder bullet emphasis INSIDE an existing role, but do not
+   fabricate a new role or change employment dates.
+8. The employer's candidate age, gender, nationality/hometown, appearance, height/weight or similar personal
+   preferences must NOT influence the rewrite. Do not add, remove, hide or emphasize personal traits to satisfy them.
+9. Do not claim a requirement is satisfied merely because it appears in the employer text.
+
+TAILORING GOAL:
+- Lead with the teacher's strongest TRUE evidence for this job.
+- Compress less relevant content without deleting important chronology.
+- Use concise professional Chinese suitable for sending to a recruiter or private-family employer.
+- For each important job requirement, show which exact teacher fact supports it.
+- Keep unsupported requirements out of the resume and surface them for human confirmation.
+
+RETURN EXACTLY THIS JSON STRUCTURE:
+{{
+  "resume_title": "short targeted professional headline",
+  "professional_summary": "120-220 Chinese characters, factual and job-targeted",
+  "core_strengths": ["fact-based strength 1", "fact-based strength 2"],
+  "tailored_resume_markdown": "complete Chinese targeted resume in markdown-style plain text",
+  "employer_recommendation": "150-300 Chinese characters for recruiter/employer recommendation",
+  "requirement_evidence": [
+    {{
+      "Requirement": "job requirement",
+      "Status": "supported | partial | missing",
+      "Evidence": "specific fact from teacher data/resume, or 资料中未找到明确证据"
+    }}
+  ],
+  "questions_to_confirm": ["only questions that materially affect this target job"],
+  "content_deemphasized": ["true but less relevant content that was compressed or moved later"],
+  "factuality_notes": ["any ambiguity/conflict that a human should review"]
+}}
+
+STRUCTURED TEACHER FACTS:
+{json.dumps(teacher_payload, ensure_ascii=False, indent=2, default=str)}
+
+ORIGINAL TEACHER RESUME:
+{resume_text if resume_text else "[No full original resume pasted. Use structured facts only and stay conservative.]"}
+
+TARGET JOB - SAFE STRUCTURED REQUIREMENTS:
+{json.dumps(order_payload, ensure_ascii=False, indent=2, default=str)}
+
+OPTIONAL FULL EMPLOYER TEXT:
+{employer_text if employer_text else "[Not provided]"}
+
+Remember: personal-trait preferences in employer text are irrelevant to the rewrite. Use only job-relevant duties,
+qualifications, work conditions and teacher-supported evidence.
+"""
+
+
+def generate_tailored_resume(
+    teacher: Dict[str, Any],
+    parsed_order: Dict[str, Any],
+    original_resume: str,
+    supplemental_employer_text: str,
+) -> Tuple[Dict[str, Any], str]:
+    prompt = build_resume_optimizer_prompt(
+        teacher=teacher,
+        parsed_order=parsed_order,
+        original_resume=original_resume,
+        supplemental_employer_text=supplemental_employer_text,
+    )
+    payload, model_used = generate_json_prompt(prompt)
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Gemini 简历优化返回的顶层内容不是 JSON object。")
+
+    # Resume optimizer must not accidentally return the order-parser wrapper.
+    if "orders" in payload and len(payload) == 1:
+        raise RuntimeError("Gemini 返回了订单格式而不是简历格式，请重新生成一次。")
+
+    required_keys = {
+        "resume_title", "professional_summary", "tailored_resume_markdown",
+        "employer_recommendation", "requirement_evidence", "questions_to_confirm",
+    }
+    if not required_keys.intersection(payload.keys()):
+        raise RuntimeError("Gemini 返回内容缺少定制简历字段，请重新生成一次。")
+
+    payload.setdefault("resume_title", "")
+    payload.setdefault("professional_summary", "")
+    payload.setdefault("core_strengths", [])
+    payload.setdefault("tailored_resume_markdown", "")
+    payload.setdefault("employer_recommendation", "")
+    payload.setdefault("requirement_evidence", [])
+    payload.setdefault("questions_to_confirm", [])
+    payload.setdefault("content_deemphasized", [])
+    payload.setdefault("factuality_notes", [])
+
+    if not isinstance(payload.get("requirement_evidence"), list):
+        payload["requirement_evidence"] = []
+    if not isinstance(payload.get("questions_to_confirm"), list):
+        payload["questions_to_confirm"] = [str(payload.get("questions_to_confirm"))]
+    if not isinstance(payload.get("core_strengths"), list):
+        payload["core_strengths"] = [str(payload.get("core_strengths"))]
+    if not isinstance(payload.get("content_deemphasized"), list):
+        payload["content_deemphasized"] = [str(payload.get("content_deemphasized"))]
+    if not isinstance(payload.get("factuality_notes"), list):
+        payload["factuality_notes"] = [str(payload.get("factuality_notes"))]
+
+    return payload, model_used
+
+
+def resume_evidence_rows(result: Dict[str, Any]) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for item in result.get("requirement_evidence", []) or []:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("Status") or "").strip().lower()
+        status_cn = {
+            "supported": "✅ 有证据",
+            "partial": "⚠️ 部分证据",
+            "missing": "❓ 缺少证据",
+        }.get(status, status or "待复核")
+        rows.append({
+            "岗位要求": str(item.get("Requirement") or ""),
+            "证据状态": status_cn,
+            "老师简历/资料证据": str(item.get("Evidence") or ""),
+        })
+    return rows
+
+
+def resume_download_text(result: Dict[str, Any]) -> str:
+    parts = []
+    title = str(result.get("resume_title") or "").strip()
+    summary = str(result.get("professional_summary") or "").strip()
+    body = str(result.get("tailored_resume_markdown") or "").strip()
+    recommendation = str(result.get("employer_recommendation") or "").strip()
+
+    if title:
+        parts.append(title)
+    if summary:
+        parts.append("【岗位定制简介】\n" + summary)
+    if body:
+        parts.append(body)
+    if recommendation:
+        parts.append("【候选人推荐语】\n" + recommendation)
+    return "\n\n".join(parts).strip()
+
+
 # ============================================================
 # 9. VALIDATE CONFIG / LOAD DATA
 # ============================================================
@@ -2993,7 +3263,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V1.9 · 去重匹配 / 资料不足 / 分类经验年限")
+    st.caption("V2.0 · 匹配 / 订单定制简历 / 事实校验")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -3024,7 +3294,8 @@ with st.sidebar:
         "单个订单模式：1 次 Gemini 请求。\n\n"
         "批量模式：① Gemini 用 1 次请求把不同平台订单统一成标准格式；"
         "② 人工确认；③ Python 本地匹配，0 次额外 Gemini。\n\n"
-        "老师反向匹配复用标准订单池：0 次新的 Gemini 请求。"
+        "老师反向匹配复用标准订单池：0 次新的 Gemini 请求。\n\n"
+        "岗位定制简历：每次生成使用 1 次 Gemini 请求；只允许重组和突出已有真实经历，不允许虚构。"
     )
 
 
@@ -3034,7 +3305,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V1.9：标准订单 → 去重岗位条件 → 分类经验年限 → 资料充分度 → Python本地匹配。</div>',
+    '<div class="main-subtitle">V2.0：标准订单 → 老师匹配 → 针对目标订单生成真实、可核验的定制简历。</div>',
     unsafe_allow_html=True,
 )
 
@@ -3044,6 +3315,7 @@ mode = st.radio(
         "① 单个订单 → 匹配全部老师",
         "② 批量订单 → 每单推荐老师",
         "③ 选择老师 → 匹配全部订单",
+        "④ 根据订单优化老师简历",
     ],
     horizontal=True,
 )
@@ -3140,7 +3412,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V1.9 使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.0 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -3318,7 +3590,7 @@ elif mode == "② 批量订单 → 每单推荐老师":
 # 14. MODE 3 - ONE TEACHER TO ALL ORDERS
 # ============================================================
 
-else:
+elif mode == "③ 选择老师 → 匹配全部订单":
     st.markdown('<div class="section-title">选择老师 → 反向匹配全部订单</div>', unsafe_allow_html=True)
     st.caption("适合新老师入库后直接查：当前标准订单池里，哪些订单最适合这位老师？")
 
@@ -3489,12 +3761,288 @@ else:
                 render_compact_candidate(1, item)
 
 
+
 # ============================================================
-# 15. FOOTER
+# 15. MODE 4 - JOB-TARGETED RESUME OPTIMIZATION
+# ============================================================
+
+else:
+    st.markdown('<div class="section-title">根据目标订单优化老师简历</div>', unsafe_allow_html=True)
+    st.caption(
+        "选择老师和目标订单后，Gemini 只会重新组织、突出和改写已有真实经历。"
+        "任何简历/数据库中没有证据的能力都会进入『待确认』，不会为了迎合岗位而虚构。"
+    )
+
+    if not teachers:
+        st.warning("老师数据库为空。")
+        st.stop()
+
+    teacher_indexes_v20 = list(range(len(teachers)))
+    resume_teacher_index = st.selectbox(
+        "① 选择老师",
+        teacher_indexes_v20,
+        format_func=lambda index: teacher_name(teachers[index]),
+        key="resume_optimizer_teacher_select_v20",
+    )
+    resume_teacher = teachers[resume_teacher_index]
+
+    available_orders = collect_available_standard_orders()
+    parsed_target: Optional[Dict[str, Any]] = None
+
+    st.markdown("### ② 选择目标订单")
+    if available_orders:
+        source_mode = st.radio(
+            "订单来源",
+            ["使用当前标准订单池", "粘贴一条新的雇主需求"],
+            horizontal=True,
+            key="resume_order_source_mode_v20",
+        )
+    else:
+        source_mode = "粘贴一条新的雇主需求"
+        st.info("当前还没有标准订单池。可以先在这里粘贴一条订单，或先去『② 批量订单』建立标准订单池。")
+
+    if source_mode == "使用当前标准订单池":
+        order_indexes_v20 = list(range(len(available_orders)))
+        selected_order_index = st.selectbox(
+            "目标订单",
+            order_indexes_v20,
+            format_func=lambda index: order_title(available_orders[index], index + 1),
+            key="resume_optimizer_order_select_v20",
+        )
+        parsed_target = available_orders[selected_order_index]
+    else:
+        resume_raw_order = st.text_area(
+            "粘贴 1 条目标雇主需求",
+            height=220,
+            placeholder="粘贴一条雇主订单。这里会调用 Gemini 解析 1 次，然后可用于简历优化。",
+            key="resume_optimizer_raw_order_v20",
+        )
+        p1, p2 = st.columns([4, 1])
+        with p1:
+            parse_resume_order = st.button(
+                "解析这条目标订单",
+                type="primary",
+                use_container_width=True,
+                key="resume_optimizer_parse_order_button_v20",
+            )
+        with p2:
+            clear_resume_order = st.button(
+                "清除目标订单",
+                use_container_width=True,
+                key="resume_optimizer_clear_order_button_v20",
+            )
+
+        if clear_resume_order:
+            for key in [
+                "resume_optimizer_raw_order_v20",
+                "resume_optimizer_parsed_order_v20",
+                "resume_optimizer_result_v20",
+                "resume_optimizer_model_v20",
+            ]:
+                st.session_state.pop(key, None)
+            st.rerun()
+
+        if parse_resume_order:
+            if not resume_raw_order.strip():
+                st.warning("请先粘贴一条目标订单。")
+            else:
+                try:
+                    with st.spinner("Gemini 正在解析这条目标订单..."):
+                        st.session_state["resume_optimizer_parsed_order_v20"] = parse_employer_order(resume_raw_order)
+                    st.rerun()
+                except Exception as exc:
+                    render_api_error(exc)
+
+        parsed_target = st.session_state.get("resume_optimizer_parsed_order_v20")
+
+    if parsed_target:
+        st.markdown("### 目标订单确认")
+        with st.expander(order_title(parsed_target, 1), expanded=False):
+            render_parsed_order_compact(parsed_target)
+            manual = parsed_target.get("manual_review", {})
+            if manual:
+                st.caption("年龄、性别、籍贯、外貌等人工复核信息不会用于简历优化。")
+
+    st.markdown("### ③ 提供老师原始简历")
+    teacher_identity = str(resume_teacher.get("Baserow ID") or teacher_name(resume_teacher)).replace(" ", "_")
+    resume_editor_key = f"resume_source_text_v20_{teacher_identity}"
+    if resume_editor_key not in st.session_state:
+        st.session_state[resume_editor_key] = teacher_resume_source_hint(resume_teacher)
+
+    original_resume_text = st.text_area(
+        "老师原始简历（建议粘贴完整简历）",
+        height=520,
+        key=resume_editor_key,
+        placeholder=(
+            "如果 Baserow 里没有完整简历，请把老师原始简历粘贴到这里。\n"
+            "系统会同时参考 Baserow 结构化老师资料，但不会编造简历中不存在的经历。"
+        ),
+    )
+
+    if not original_resume_text.strip():
+        st.warning(
+            "目前没有完整原始简历文本。仍然可以仅根据 Baserow 已有结构化资料生成保守版，"
+            "但工作经历细节会比较少。为了生成完整定制简历，建议粘贴原始简历。"
+        )
+
+    supplemental_default = ""
+    if parsed_target:
+        supplemental_default = str(
+            parsed_target.get("original_request")
+            or parsed_target.get("source_excerpt")
+            or ""
+        ).strip()
+    employer_editor_key = f"resume_employer_text_v20_{teacher_identity}"
+    if employer_editor_key not in st.session_state:
+        st.session_state[employer_editor_key] = supplemental_default
+
+    supplemental_employer_text = st.text_area(
+        "完整雇主原文（可选，用于补充标准订单未保留的工作内容）",
+        height=180,
+        key=employer_editor_key,
+        placeholder="可选。如果标准订单已经完整，可留空；如果想让AI看到更完整的工作内容，可粘贴原始雇主需求。",
+    )
+
+    st.markdown("### ④ 生成岗位定制简历")
+    r1, r2 = st.columns([4, 1])
+    with r1:
+        generate_resume = st.button(
+            "AI生成岗位定制简历",
+            type="primary",
+            use_container_width=True,
+            key="resume_optimizer_generate_v20",
+        )
+    with r2:
+        clear_resume_result = st.button(
+            "清除定制结果",
+            use_container_width=True,
+            key="resume_optimizer_clear_result_v20",
+        )
+
+    if clear_resume_result:
+        for key in [
+            "resume_optimizer_result_v20",
+            "resume_optimizer_model_v20",
+            "resume_optimizer_result_teacher_v20",
+            "resume_optimizer_result_order_v20",
+            "resume_tailored_editor_v20",
+            "resume_recommendation_editor_v20",
+        ]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    if generate_resume:
+        if not parsed_target:
+            st.warning("请先选择或解析目标订单。")
+        else:
+            try:
+                with st.spinner("Gemini 正在基于真实老师资料和目标订单重组简历..."):
+                    resume_result, resume_model = generate_tailored_resume(
+                        teacher=resume_teacher,
+                        parsed_order=parsed_target,
+                        original_resume=original_resume_text,
+                        supplemental_employer_text=supplemental_employer_text,
+                    )
+                    st.session_state["resume_optimizer_result_v20"] = resume_result
+                    st.session_state["resume_optimizer_model_v20"] = resume_model
+                    st.session_state["resume_optimizer_result_teacher_v20"] = teacher_name(resume_teacher)
+                    st.session_state["resume_optimizer_result_order_v20"] = order_title(parsed_target, 1)
+                    st.session_state["resume_tailored_editor_v20"] = str(
+                        resume_result.get("tailored_resume_markdown") or ""
+                    )
+                    st.session_state["resume_recommendation_editor_v20"] = str(
+                        resume_result.get("employer_recommendation") or ""
+                    )
+                st.rerun()
+            except Exception as exc:
+                render_api_error(exc)
+
+    resume_result = st.session_state.get("resume_optimizer_result_v20")
+    if resume_result:
+        st.divider()
+        result_teacher = st.session_state.get("resume_optimizer_result_teacher_v20") or teacher_name(resume_teacher)
+        result_order = st.session_state.get("resume_optimizer_result_order_v20") or "目标订单"
+        st.markdown(f"## {result_teacher}｜针对 {result_order} 的定制简历")
+        st.success("此版本只允许使用原始简历和老师数据库中已有证据；缺少证据的要求不会被写成老师能力。")
+
+        title = str(resume_result.get("resume_title") or "").strip()
+        summary = str(resume_result.get("professional_summary") or "").strip()
+        strengths = [str(x) for x in resume_result.get("core_strengths", []) if str(x).strip()]
+
+        if title:
+            st.markdown(f"### {title}")
+        if summary:
+            st.write(summary)
+        if strengths:
+            st.markdown("#### 本岗位重点优势")
+            for strength in strengths:
+                st.write(f"• {strength}")
+
+        evidence = resume_evidence_rows(resume_result)
+        st.markdown("### 岗位要求 ↔ 老师真实证据")
+        if evidence:
+            st.dataframe(evidence, use_container_width=True, hide_index=True)
+        else:
+            st.caption("AI未返回证据对照表，请人工复核定制简历。")
+
+        questions = [str(x) for x in resume_result.get("questions_to_confirm", []) if str(x).strip()]
+        notes = [str(x) for x in resume_result.get("factuality_notes", []) if str(x).strip()]
+        if questions or notes:
+            with st.expander("⚠️ 上户/投递前需要人工确认", expanded=True):
+                for question in questions:
+                    st.warning(question)
+                for note in notes:
+                    st.info(note)
+
+        st.markdown("### 完整岗位定制版简历（可继续人工修改）")
+        tailored_text = st.text_area(
+            "定制简历",
+            height=760,
+            key="resume_tailored_editor_v20",
+        )
+
+        st.markdown("### 给派单老师 / 雇主的候选人推荐语")
+        recommendation_text = st.text_area(
+            "推荐简介",
+            height=220,
+            key="resume_recommendation_editor_v20",
+        )
+
+        deemphasized = [str(x) for x in resume_result.get("content_deemphasized", []) if str(x).strip()]
+        if deemphasized:
+            with st.expander("本岗位中被压缩/后置的真实内容"):
+                for item in deemphasized:
+                    st.write(f"• {item}")
+
+        download_body = tailored_text.strip()
+        if recommendation_text.strip():
+            download_body += "\n\n【候选人推荐语】\n" + recommendation_text.strip()
+
+        d1, d2 = st.columns(2)
+        with d1:
+            st.download_button(
+                "下载岗位定制简历 TXT",
+                data=download_body.encode("utf-8"),
+                file_name=f"{result_teacher}_岗位定制简历.txt".replace("/", "-"),
+                mime="text/plain;charset=utf-8",
+                use_container_width=True,
+            )
+        with d2:
+            st.download_button(
+                "下载事实校验 JSON",
+                data=json.dumps(resume_result, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name=f"{result_teacher}_简历事实校验.json".replace("/", "-"),
+                mime="application/json",
+                use_container_width=True,
+            )
+
+
+# ============================================================
+# 16. FOOTER
 # ============================================================
 
 st.divider()
 st.caption(
-    "Teacher Matching System V1.9 · AI统一订单格式、条件去重、分类经验年限、资料不足提示、标准订单池。"
-    "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；个人属性要求仅供人工复核。"
+    "Teacher Matching System V2.0 · AI统一订单格式、老师匹配、标准订单池、岗位定制简历与事实校验。"
+    "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
