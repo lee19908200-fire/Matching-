@@ -1,10 +1,10 @@
 # ============================================================
-# AI Teacher Matching System V1.3
+# AI Teacher Matching System V1.4
 # Single-file Streamlit app
 #
 # Goals
-# - Parse one employer order with Gemini
-# - Read teachers from Baserow
+# - Support single-order, batch-order, and teacher-to-orders matching
+# - Read teachers from Baserow and rank them against one or many orders
 # - Match only job-relevant qualifications / work conditions
 # - Keep candidate age, gender, nationality/hometown and appearance
 #   requirements in a manual-review section; they do NOT affect
@@ -30,7 +30,7 @@ from google.genai import types
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V1.3",
+    page_title="AI Teacher Matching System V1.4",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1163,8 +1163,426 @@ def render_teacher_card(rank: int, item: Dict[str, Any]) -> None:
             st.json(clean)
 
 
+
 # ============================================================
-# 8. VALIDATE CONFIG / LOAD DATA
+# 8. BATCH PARSER / BATCH MATCHING HELPERS
+# ============================================================
+
+
+def split_batch_orders(batch_text: str) -> List[str]:
+    """Split pasted recruitment messages into individual orders without using Gemini.
+
+    The common source format repeats "沪上睿知派单中心" for every order, so that
+    marker is preferred. If it is not present, blank-line separation is used.
+    """
+    text = str(batch_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return []
+
+    marker_parts = [
+        part.strip()
+        for part in re.split(r"(?=沪上睿知派单中心\s*[:：]?)", text)
+        if part.strip()
+    ]
+    if len(marker_parts) > 1:
+        return marker_parts
+
+    blank_parts = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+    if len(blank_parts) > 1:
+        return blank_parts
+
+    return [text]
+
+
+def build_batch_parser_prompt(order_blocks: List[str]) -> str:
+    numbered_orders = "\n\n".join(
+        f"===== SOURCE ORDER {index} =====\n{block}"
+        for index, block in enumerate(order_blocks, start=1)
+    )
+
+    return f"""
+You parse MULTIPLE private-family recruitment orders into structured JSON.
+Return JSON only. Do not include markdown.
+
+There are exactly {len(order_blocks)} numbered source orders below.
+Do not merge different orders. Do not invent extra orders.
+Return one object for each source order, using its exact Source Index.
+
+IMPORTANT EMPLOYMENT-SAFETY RULE:
+Candidate age, gender, nationality/hometown/regional exclusions, appearance, height/weight,
+and personality/style preferences must NEVER be placed in hard_requirements or preferred_requirements.
+Preserve them only under manual_review for a human recruiter. They must not affect automated ranking.
+
+RETURN THIS TOP-LEVEL STRUCTURE:
+{{
+  "orders": [
+    {{
+      "Source Index": 1,
+      "order_info": {{
+        "Order ID": null,
+        "Job Type": null,
+        "Working Cities": [],
+        "Job District": null,
+        "Salary Text": null,
+        "Work Schedule": null,
+        "Start Date": null,
+        "Live-in Job": null,
+        "Child Ages": [],
+        "Child Count": null,
+        "Special Needs": []
+      }},
+      "hard_requirements": {{}},
+      "preferred_requirements": {{}},
+      "reference_requirements": {{}},
+      "manual_review": {{}}
+    }}
+  ]
+}}
+
+AUTOMATED MATCHING FIELDS ALLOWED IN hard_requirements / preferred_requirements:
+- Working Cities: array of standardized English city names
+- Live-in Required: boolean
+- Night Care Required: boolean
+- Private Room Provided: boolean
+- Driving Required: boolean
+- Teaching Languages: array
+- Minimum Degree: High School / Diploma / Associate Degree / Bachelor / Master / Doctorate
+- Minimum Years of Relevant Experience: number
+- Subjects: array
+- Curriculum: array
+- Early Years Experience: boolean
+- Montessori Experience: boolean
+- International School Experience: boolean
+- Kindergarten Experience: boolean
+- High-end Family Experience: boolean
+- Private Tutoring Experience: boolean
+- SEN / ADHD Experience: boolean
+- Willing to Travel: boolean
+- Cooking Required: boolean
+- Baby Food Required: boolean
+- Housekeeping Required: boolean
+- School Pick-up Required: boolean
+- Family-School Communication Required: boolean
+- General Tutoring Experience: boolean
+- Child Psychology Experience: boolean
+- Luxury Hotel Experience: boolean
+- Nutrition Planning: boolean
+- Required Certificates: array
+- Exam Preparation: array
+
+REFERENCE ONLY:
+- Child Ages: array of numeric ages in years. 18 months -> 1.5, 1 year 4 months -> 1.33.
+Child ages must not become a hard rejection criterion.
+
+MANUAL REVIEW ONLY, NEVER AUTOMATED RANKING:
+- Candidate Age Requirement
+- Candidate Gender Preference
+- Nationality / Hometown / Regional Preference
+- Appearance / Height / Weight Preference
+- Personality / Style Preference
+- Education Institution / Major Preference
+- Other Manual Review Notes
+
+INTERPRETATION RULES:
+1. Employer/family/job location -> Working Cities. District stays in Job District.
+2. 住家 -> Live-in Required=true. 不住家 -> Live-in Job=false but do not require a teacher to be non-live-in.
+   住家/不住家均可 -> no Live-in Required.
+3. 需要带睡 / 陪睡 / 夜间照护 / 偶尔夜间带睡 -> Night Care Required=true.
+   不带睡 / 不用带睡 -> Night Care Required=false; preserve it, but it must not reject a teacher.
+4. 独立房间 / 老师有独立房间 / 提供独立房间 -> Private Room Provided=true.
+5. 全英文 / 英语好 / 英语口语流利 / 全英授课 -> Teaching Languages=["English"].
+6. 本科及以上 -> Minimum Degree="Bachelor". 研究生/硕士 -> "Master". 大专/专科及以上 -> "Associate Degree".
+7. 早教 / 0-3岁早教 -> Early Years Experience=true.
+8. 蒙氏 / Montessori -> Montessori Experience=true. If a Montessori certificate is explicitly required, add it to Required Certificates.
+9. 国际学校经历 -> International School Experience=true. A child merely attending an international school is only order context.
+10. 幼儿园工作经历 -> Kindergarten Experience=true.
+11. ADHD / SEN child -> SEN / ADHD Experience=true.
+12. 全科辅导 -> General Tutoring Experience=true.
+13. 家校对接 / 家校沟通 -> Family-School Communication Required=true.
+14. 开车接送 / 熟练驾驶 -> Driving Required=true. 接送孩子 -> School Pick-up Required=true when pickup is part of the job.
+15. 跟随老板出差 -> Willing to Travel=true.
+16. 辅食 -> Baby Food Required=true. 做饭/家常菜 -> Cooking Required=true. 家务/收纳 -> Housekeeping Required=true.
+17. 营养搭配 -> Nutrition Planning=true.
+18. 星级酒店从业经验 -> Luxury Hotel Experience=true.
+19. PET/KET/AP/SAT exam preparation -> Exam Preparation.
+20. IB/AP/IGCSE/A-Level familiarity -> Curriculum.
+21. "最好/优先/优先考虑" -> preferred_requirements. Explicit "要求/必须/需要" -> hard_requirements.
+22. "无需家务/不做家务" may be Housekeeping Required=false or omitted, and must never reject a teacher.
+23. Job title such as 育儿师/儿陪师/家庭教师/私人助理/高端家务师 goes to Job Type only.
+24. Do not invent qualifications not stated.
+25. Candidate age limits, gender, hometown exclusions, appearance, personality, and similar personal traits go only to manual_review.
+
+SOURCE ORDERS:
+{numbered_orders}
+"""
+
+
+def generate_json_prompt(prompt: str) -> Tuple[Dict[str, Any], str]:
+    """Run one Gemini JSON generation call with the same model fallback as single mode."""
+    client = gemini_client()
+
+    def generate(model_name: str):
+        return client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+
+    model_used = GEMINI_MODEL
+    try:
+        response = generate(model_used)
+    except Exception as first_exc:
+        text = str(first_exc)
+        if "404" in text or "NOT_FOUND" in text or "not available" in text.lower():
+            models = list_generate_models(client)
+            alternatives = [m for m in models if "flash" in m.lower() and m != model_used]
+            if alternatives:
+                model_used = alternatives[0]
+                response = generate(model_used)
+            else:
+                raise
+        else:
+            raise
+
+    if not getattr(response, "text", None):
+        raise RuntimeError("Gemini 返回了响应，但没有文本内容。")
+
+    try:
+        payload = json.loads(clean_json_text(response.text))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Gemini 返回内容不是有效 JSON：{response.text[:1200]}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Gemini 批量解析返回的顶层内容不是 JSON object。")
+
+    return payload, model_used
+
+
+def normalize_parsed_order_from_raw(
+    raw: Dict[str, Any],
+    original_request: str,
+    model_used: str,
+) -> Dict[str, Any]:
+    """Normalize one order object returned from a batch Gemini request."""
+    order_info = normalize_order_info(raw.get("order_info"))
+    hard, w1 = normalize_requirement_group(raw.get("hard_requirements", {}))
+    preferred, w2 = normalize_requirement_group(raw.get("preferred_requirements", {}))
+    reference, w3 = normalize_reference_group(raw.get("reference_requirements", {}), order_info)
+    manual_review = normalize_manual_review(raw.get("manual_review", {}))
+
+    if order_info.get("Working Cities") and "Working Cities" not in hard:
+        hard["Working Cities"] = order_info["Working Cities"]
+    if order_info.get("Live-in Job") is True and "Live-in Required" not in hard:
+        hard["Live-in Required"] = True
+
+    return {
+        "original_request": original_request,
+        "model_used": model_used,
+        "order_info": order_info,
+        "hard_requirements": hard,
+        "preferred_requirements": preferred,
+        "reference_requirements": reference,
+        "manual_review": manual_review,
+        "raw_requirements": raw,
+        "warnings": w1 + w2 + w3,
+    }
+
+
+def parse_employer_orders_batch(batch_text: str) -> List[Dict[str, Any]]:
+    """Parse many pasted orders in ONE Gemini generate_content request."""
+    order_blocks = split_batch_orders(batch_text)
+    if not order_blocks:
+        raise ValueError("请先粘贴雇主订单。")
+    if len(order_blocks) > 40:
+        raise ValueError("一次最多建议解析 40 条订单，请分两批处理。")
+
+    prompt = build_batch_parser_prompt(order_blocks)
+    payload, model_used = generate_json_prompt(prompt)
+    raw_orders = payload.get("orders", [])
+
+    if not isinstance(raw_orders, list) or not raw_orders:
+        raise RuntimeError("Gemini 没有返回可用的 orders 数组。")
+
+    parsed_by_index: Dict[int, Dict[str, Any]] = {}
+    for fallback_index, raw in enumerate(raw_orders, start=1):
+        if not isinstance(raw, dict):
+            continue
+        source_index_number = to_number(raw.get("Source Index"))
+        source_index = int(source_index_number) if source_index_number is not None else fallback_index
+        if source_index < 1 or source_index > len(order_blocks):
+            continue
+        parsed_by_index[source_index] = normalize_parsed_order_from_raw(
+            raw=raw,
+            original_request=order_blocks[source_index - 1],
+            model_used=model_used,
+        )
+
+    parsed_orders = [parsed_by_index[index] for index in sorted(parsed_by_index)]
+    if not parsed_orders:
+        raise RuntimeError("批量解析完成，但没有成功标准化任何订单。")
+
+    missing_indexes = [index for index in range(1, len(order_blocks) + 1) if index not in parsed_by_index]
+    if missing_indexes:
+        warning = "Gemini 本次遗漏了源订单：" + ", ".join(str(x) for x in missing_indexes)
+        parsed_orders[0].setdefault("warnings", []).append(warning)
+
+    return parsed_orders
+
+
+def order_title(parsed: Dict[str, Any], fallback_index: Optional[int] = None) -> str:
+    info = parsed.get("order_info", {})
+    order_id = str(info.get("Order ID") or "").strip()
+    cities = format_list(info.get("Working Cities"))
+    job_type = str(info.get("Job Type") or "").strip()
+    parts = [x for x in [order_id, cities if cities != "未填写" else "", job_type] if x]
+    if parts:
+        return " · ".join(parts)
+    if fallback_index is not None:
+        return f"订单 {fallback_index}"
+    return "未命名订单"
+
+
+def status_text(status: str) -> str:
+    if status == "confirmed":
+        return "✅ 已确认匹配"
+    if status == "pending":
+        return "⚠️ 待确认"
+    return "❌ 有冲突"
+
+
+def run_batch_matching(
+    teachers: List[Dict[str, Any]],
+    parsed_orders: List[Dict[str, Any]],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    bundle: List[Dict[str, Any]] = []
+    for parsed in parsed_orders:
+        results = run_matching(teachers, parsed, top_n=top_k)
+        bundle.append({"parsed": parsed, "results": results})
+    return bundle
+
+
+def match_teacher_to_orders(
+    teacher: Dict[str, Any],
+    parsed_orders: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for parsed in parsed_orders:
+        result = match_teacher(teacher, parsed)
+        rows.append({"parsed": parsed, "match": result})
+    rows.sort(
+        key=lambda item: (
+            item["match"]["status_rank"],
+            item["match"]["score"],
+            item["match"]["confirmation"],
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def compact_field_names(fields: List[str]) -> str:
+    return "、".join(field_label(field) for field in fields) if fields else "无"
+
+
+def render_compact_candidate(rank: int, item: Dict[str, Any]) -> None:
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([3, 1, 1])
+        with c1:
+            st.markdown(f"**{rank}. {item['name']}**")
+            st.caption(status_text(item["status"]))
+        with c2:
+            st.metric("匹配度", f"{item['score']}%")
+        with c3:
+            st.metric("确认度", f"{item['confirmation']}%")
+
+        if item["hard"][CONFLICT]:
+            st.write("❌ **硬条件冲突：**", compact_field_names(item["hard"][CONFLICT]))
+        if item["hard"][UNKNOWN]:
+            st.write("⚠️ **待确认：**", compact_field_names(item["hard"][UNKNOWN]))
+        if item["hard"][MATCH]:
+            st.write("✅ **已匹配：**", compact_field_names(item["hard"][MATCH]))
+
+
+def render_parsed_order_compact(parsed: Dict[str, Any]) -> None:
+    left, right = st.columns([1, 2])
+    with left:
+        render_order_info(parsed.get("order_info", {}))
+    with right:
+        h, p, r = st.columns(3)
+        with h:
+            render_requirement_group("岗位硬条件", parsed.get("hard_requirements", {}))
+        with p:
+            render_requirement_group("偏好条件", parsed.get("preferred_requirements", {}))
+        with r:
+            render_requirement_group("参考条件", parsed.get("reference_requirements", {}))
+
+    manual = parsed.get("manual_review", {})
+    if manual:
+        st.warning("以下内容只供人工复核，不参与自动匹配：")
+        for key, value in manual.items():
+            st.write(f"**{key}：** {requirement_value(value)}")
+
+
+def batch_summary_rows(bundle: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for index, entry in enumerate(bundle, start=1):
+        parsed = entry["parsed"]
+        info = parsed.get("order_info", {})
+        row: Dict[str, Any] = {
+            "序号": index,
+            "订单编号": info.get("Order ID") or "未识别",
+            "城市": format_list(info.get("Working Cities")),
+            "岗位": info.get("Job Type") or "未识别",
+        }
+        for candidate_index in range(top_k):
+            if candidate_index < len(entry["results"]):
+                item = entry["results"][candidate_index]
+                row[f"Top {candidate_index + 1}"] = item["name"]
+                row[f"Top {candidate_index + 1} 匹配度"] = f"{item['score']}%"
+                row[f"Top {candidate_index + 1} 状态"] = status_text(item["status"])
+            else:
+                row[f"Top {candidate_index + 1}"] = ""
+                row[f"Top {candidate_index + 1} 匹配度"] = ""
+                row[f"Top {candidate_index + 1} 状态"] = ""
+        rows.append(row)
+    return rows
+
+
+def reverse_summary_rows(reverse_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for index, entry in enumerate(reverse_results, start=1):
+        parsed = entry["parsed"]
+        result = entry["match"]
+        info = parsed.get("order_info", {})
+        rows.append(
+            {
+                "排名": index,
+                "订单编号": info.get("Order ID") or "未识别",
+                "城市": format_list(info.get("Working Cities")),
+                "岗位": info.get("Job Type") or "未识别",
+                "匹配度": f"{result['score']}%",
+                "状态": status_text(result["status"]),
+                "硬条件确认度": f"{result['confirmation']}%",
+                "冲突": compact_field_names(result["hard"][CONFLICT]),
+                "待确认": compact_field_names(result["hard"][UNKNOWN]),
+            }
+        )
+    return rows
+
+
+def render_api_error(exc: Exception) -> None:
+    text = str(exc)
+    if "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in text.lower() or "rate limit" in text.lower():
+        st.error("Gemini API 当前额度已达到限制。")
+        st.warning("请等待额度恢复或调整 Gemini API 计费/额度后再次运行。Baserow 老师数据不受影响。")
+    else:
+        st.error("处理过程中发生错误。")
+        st.exception(exc)
+
+
+# ============================================================
+# 9. VALIDATE CONFIG / LOAD DATA
 # ============================================================
 
 config_errors = []
@@ -1190,12 +1608,12 @@ except Exception as exc:
 
 
 # ============================================================
-# 9. SIDEBAR
+# 10. SIDEBAR
 # ============================================================
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V1.3 · Baserow + Gemini + Streamlit")
+    st.caption("V1.4 · 单单 / 批量 / 老师反向匹配")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -1223,142 +1641,331 @@ with st.sidebar:
 
     st.divider()
     st.info(
-        "自动排序只使用岗位相关能力、资历与工作条件。"
-        "候选人年龄、性别、国籍/籍贯、外貌等只进入人工复核备注，不参与自动排名。"
+        "单个订单模式：1 次 Gemini 请求。\n\n"
+        "批量模式：多条订单合并为 1 次 Gemini 请求。\n\n"
+        "老师反向匹配如果复用最近批量解析结果：0 次新的 Gemini 请求。"
     )
 
 
 # ============================================================
-# 10. HEADER + INPUT
+# 11. HEADER / MODE SELECTOR
 # ============================================================
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">粘贴一条雇主订单 → Gemini 结构化 → Baserow 老师库自动匹配 → 人工确认待核项。</div>',
+    '<div class="main-subtitle">V1.4：单个订单、批量派单、指定老师反向找订单。</div>',
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="section-title">1. 输入一条雇主订单</div>', unsafe_allow_html=True)
-
-example = (
-    "订单编码：HXC20260806688 北京朝阳区（住家）儿陪师。"
-    "内容：专带4岁女宝；宝宝已经上国际幼儿园；老师有独立房间，不用带睡。"
-    "要求：40岁以内；英语好；本科及以上学历。"
+mode = st.radio(
+    "选择匹配模式",
+    [
+        "① 单个订单 → 匹配全部老师",
+        "② 批量订单 → 每单推荐老师",
+        "③ 选择老师 → 匹配全部订单",
+    ],
+    horizontal=True,
 )
 
-employer_request = st.text_area("雇主需求", height=220, placeholder=example)
 
-b1, b2 = st.columns([4, 1])
-with b1:
-    start_matching = st.button("开始匹配", type="primary", use_container_width=True)
-with b2:
-    clear = st.button("清除结果", use_container_width=True)
+# ============================================================
+# 12. MODE 1 - SINGLE ORDER
+# ============================================================
 
-if clear:
-    for key in ["parsed_order", "matching_results"]:
-        st.session_state.pop(key, None)
-    st.rerun()
+if mode == "① 单个订单 → 匹配全部老师":
+    st.markdown('<div class="section-title">单个订单匹配</div>', unsafe_allow_html=True)
+    st.caption("粘贴 1 条订单。Gemini 解析 1 次，然后本地 Python 与 Baserow 中全部老师匹配。")
+
+    example = (
+        "订单编码：HXC20260806688 北京朝阳区（住家）儿陪师。"
+        "内容：专带4岁女宝；宝宝已经上国际幼儿园；老师有独立房间，不用带睡。"
+        "要求：40岁以内；英语好；本科及以上学历。"
+    )
+
+    single_request = st.text_area(
+        "雇主需求",
+        height=220,
+        placeholder=example,
+        key="single_request_text",
+    )
+
+    b1, b2 = st.columns([4, 1])
+    with b1:
+        single_start = st.button("开始单单匹配", type="primary", use_container_width=True)
+    with b2:
+        single_clear = st.button("清除单单结果", use_container_width=True)
+
+    if single_clear:
+        for key in ["single_parsed_order", "single_matching_results"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    if single_start:
+        request_text = single_request.strip()
+        if not request_text:
+            st.warning("请先粘贴一条雇主订单。")
+        else:
+            try:
+                with st.spinner("Gemini 正在解析订单并匹配全部老师..."):
+                    parsed = parse_employer_order(request_text)
+                    results = run_matching(teachers, parsed, top_n=TOP_N)
+                    st.session_state["single_parsed_order"] = parsed
+                    st.session_state["single_matching_results"] = results
+            except Exception as exc:
+                render_api_error(exc)
+
+    single_parsed = st.session_state.get("single_parsed_order")
+    single_results = st.session_state.get("single_matching_results")
+
+    if single_parsed:
+        st.divider()
+        st.markdown("### AI 解析后的订单")
+        with st.expander("查看原始订单"):
+            st.write(single_parsed["original_request"])
+        render_parsed_order_compact(single_parsed)
+        if single_parsed.get("warnings"):
+            with st.expander("解析提示"):
+                for warning in single_parsed["warnings"]:
+                    st.warning(warning)
+
+    if single_results is not None:
+        st.divider()
+        st.markdown("### 推荐老师")
+        confirmed = sum(1 for item in single_results if item["status"] == "confirmed")
+        pending = sum(1 for item in single_results if item["status"] == "pending")
+        conflicts = sum(1 for item in single_results if item["status"] == "conflict")
+        best = single_results[0]["score"] if single_results else 0
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("候选人数", len(single_results))
+        with m2:
+            st.metric("硬条件确认匹配", confirmed)
+        with m3:
+            st.metric("需要人工确认", pending)
+        with m4:
+            st.metric("最高匹配度", f"{best}%")
+        if conflicts:
+            st.caption(f"另外有 {conflicts} 位候选人存在已确认的岗位硬条件冲突。")
+
+        for index, item in enumerate(single_results, start=1):
+            render_teacher_card(index, item)
 
 
 # ============================================================
-# 11. RUN
+# 13. MODE 2 - BATCH ORDERS
 # ============================================================
 
-if start_matching:
-    request_text = employer_request.strip()
-    if not request_text:
-        st.warning("请先粘贴一条雇主订单。")
-    else:
-        try:
-            with st.spinner("Gemini 正在解析订单并匹配老师..."):
-                parsed = parse_employer_order(request_text)
-                results = run_matching(teachers, parsed, top_n=TOP_N)
-                st.session_state["parsed_order"] = parsed
-                st.session_state["matching_results"] = results
-        except Exception as exc:
-            text = str(exc)
-            if "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in text.lower() or "rate limit" in text.lower():
-                st.error("Gemini API 当前额度已达到限制。")
-                st.warning("请等待额度恢复或调整 Gemini API 计费/额度后再次点击『开始匹配』。Baserow 数据不受影响。")
-            else:
-                st.error("匹配过程中发生错误。")
-                st.exception(exc)
+elif mode == "② 批量订单 → 每单推荐老师":
+    st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
+    st.caption(
+        "一次粘贴多条订单。系统先自动拆分，再用 1 次 Gemini 请求批量结构化，"
+        "之后每条订单与全部老师本地匹配。"
+    )
+
+    batch_text = st.text_area(
+        "批量粘贴订单",
+        height=420,
+        placeholder=(
+            "沪上睿知派单中心: ... 第一条订单\n"
+            "沪上睿知派单中心: ... 第二条订单\n"
+            "沪上睿知派单中心: ... 第三条订单"
+        ),
+        key="batch_request_text",
+    )
+
+    detected_blocks = split_batch_orders(batch_text) if batch_text.strip() else []
+    if detected_blocks:
+        st.info(f"当前自动识别到 **{len(detected_blocks)} 条订单**。")
+
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        batch_top_k = st.selectbox("每单推荐人数", [3, 5, 10], index=0)
+    with c2:
+        st.caption("推荐人数只影响展示；每条订单仍会与数据库全部老师进行比较。")
+
+    b1, b2 = st.columns([4, 1])
+    with b1:
+        batch_start = st.button("开始批量匹配", type="primary", use_container_width=True)
+    with b2:
+        batch_clear = st.button("清除批量结果", use_container_width=True)
+
+    if batch_clear:
+        for key in ["batch_parsed_orders", "batch_matching_bundle", "batch_top_k_saved"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    if batch_start:
+        if not batch_text.strip():
+            st.warning("请先粘贴多条订单。")
+        else:
+            try:
+                with st.spinner("Gemini 正在一次性解析全部订单，然后批量匹配老师..."):
+                    parsed_orders = parse_employer_orders_batch(batch_text)
+                    bundle = run_batch_matching(teachers, parsed_orders, top_k=batch_top_k)
+                    st.session_state["batch_parsed_orders"] = parsed_orders
+                    st.session_state["batch_matching_bundle"] = bundle
+                    st.session_state["batch_top_k_saved"] = batch_top_k
+            except Exception as exc:
+                render_api_error(exc)
+
+    batch_parsed_orders = st.session_state.get("batch_parsed_orders")
+    batch_bundle = st.session_state.get("batch_matching_bundle")
+    saved_top_k = int(st.session_state.get("batch_top_k_saved", 3))
+
+    if batch_parsed_orders:
+        st.divider()
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric("已解析订单", len(batch_parsed_orders))
+        with m2:
+            st.metric("老师数据库", len(teachers))
+        with m3:
+            st.metric("本次 Gemini 生成请求", "1 次")
+
+    if batch_bundle:
+        st.markdown("### 批量推荐总览")
+        st.dataframe(
+            batch_summary_rows(batch_bundle, saved_top_k),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("### 每条订单详细结果")
+        for order_index, entry in enumerate(batch_bundle, start=1):
+            parsed = entry["parsed"]
+            results = entry["results"]
+            label = order_title(parsed, order_index)
+            best_text = f" · Top1 {results[0]['name']} {results[0]['score']}%" if results else ""
+            with st.expander(f"{order_index}. {label}{best_text}"):
+                with st.expander("查看原始订单"):
+                    st.write(parsed.get("original_request", ""))
+                render_parsed_order_compact(parsed)
+                st.markdown("#### 推荐老师")
+                for candidate_index, item in enumerate(results, start=1):
+                    render_compact_candidate(candidate_index, item)
+                if parsed.get("warnings"):
+                    for warning in parsed["warnings"]:
+                        st.warning(warning)
 
 
 # ============================================================
-# 12. PARSED ORDER
+# 14. MODE 3 - ONE TEACHER TO ALL ORDERS
 # ============================================================
 
-parsed = st.session_state.get("parsed_order")
-results = st.session_state.get("matching_results")
+else:
+    st.markdown('<div class="section-title">选择老师 → 反向匹配全部订单</div>', unsafe_allow_html=True)
+    st.caption("适合新老师入库后直接查：现在有哪些订单最适合这位老师？")
 
-if parsed:
-    st.divider()
-    st.markdown('<div class="section-title">2. AI 解析后的订单</div>', unsafe_allow_html=True)
+    teacher_indexes = list(range(len(teachers)))
+    selected_teacher_index = st.selectbox(
+        "选择老师",
+        teacher_indexes,
+        format_func=lambda index: teacher_name(teachers[index]),
+        key="reverse_teacher_select",
+    ) if teacher_indexes else None
 
-    with st.expander("查看原始订单"):
-        st.write(parsed["original_request"])
+    recent_batch = st.session_state.get("batch_parsed_orders") or []
+    use_recent = False
+    if recent_batch:
+        use_recent = st.checkbox(
+            f"直接使用最近一次已解析的 {len(recent_batch)} 条批量订单（不会新增 Gemini 请求）",
+            value=True,
+        )
 
-    o1, o2 = st.columns([1, 2])
-    with o1:
-        render_order_info(parsed.get("order_info", {}))
-    with o2:
-        h, p, r = st.columns(3)
-        with h:
-            render_requirement_group("岗位硬条件", parsed.get("hard_requirements", {}))
-        with p:
-            render_requirement_group("偏好条件", parsed.get("preferred_requirements", {}))
-        with r:
-            render_requirement_group("参考条件", parsed.get("reference_requirements", {}))
+    reverse_text = ""
+    if not use_recent:
+        reverse_text = st.text_area(
+            "粘贴需要扫描的订单",
+            height=420,
+            placeholder="可以一次粘贴多条派单信息。",
+            key="reverse_request_text",
+        )
+        blocks = split_batch_orders(reverse_text) if reverse_text.strip() else []
+        if blocks:
+            st.info(f"当前自动识别到 **{len(blocks)} 条订单**。本次点击后会使用 1 次 Gemini 生成请求。")
 
-    manual = parsed.get("manual_review", {})
-    if manual:
-        st.warning("以下内容仅供招聘人员人工复核，不参与自动筛选、匹配度或排序：")
-        for key, value in manual.items():
-            st.write(f"**{key}：** {requirement_value(value)}")
+    b1, b2 = st.columns([4, 1])
+    with b1:
+        reverse_start = st.button("为这位老师查找订单", type="primary", use_container_width=True)
+    with b2:
+        reverse_clear = st.button("清除反向结果", use_container_width=True)
 
-    if parsed.get("warnings"):
-        with st.expander("解析提示"):
-            for warning in parsed["warnings"]:
-                st.warning(warning)
+    if reverse_clear:
+        for key in ["reverse_results", "reverse_teacher_name", "reverse_parsed_orders"]:
+            st.session_state.pop(key, None)
+        st.rerun()
 
-    with st.expander("查看 Gemini 原始 JSON"):
-        st.json(parsed.get("raw_requirements", {}))
+    if reverse_start:
+        if selected_teacher_index is None:
+            st.warning("老师数据库为空。")
+        else:
+            try:
+                selected_teacher = teachers[selected_teacher_index]
+                if use_recent:
+                    parsed_orders = recent_batch
+                else:
+                    if not reverse_text.strip():
+                        st.warning("请先粘贴订单，或者勾选使用最近一次批量订单。")
+                        parsed_orders = []
+                    else:
+                        with st.spinner("Gemini 正在一次性解析全部订单..."):
+                            parsed_orders = parse_employer_orders_batch(reverse_text)
+
+                if parsed_orders:
+                    with st.spinner("正在为老师扫描全部订单..."):
+                        reverse_results = match_teacher_to_orders(selected_teacher, parsed_orders)
+                    st.session_state["reverse_results"] = reverse_results
+                    st.session_state["reverse_teacher_name"] = teacher_name(selected_teacher)
+                    st.session_state["reverse_parsed_orders"] = parsed_orders
+            except Exception as exc:
+                render_api_error(exc)
+
+    reverse_results = st.session_state.get("reverse_results")
+    reverse_teacher_name = st.session_state.get("reverse_teacher_name")
+
+    if reverse_results is not None:
+        st.divider()
+        st.markdown(f"### {reverse_teacher_name} 的订单推荐")
+
+        confirmed = sum(1 for entry in reverse_results if entry["match"]["status"] == "confirmed")
+        pending = sum(1 for entry in reverse_results if entry["match"]["status"] == "pending")
+        conflicts = sum(1 for entry in reverse_results if entry["match"]["status"] == "conflict")
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("扫描订单数", len(reverse_results))
+        with m2:
+            st.metric("确认匹配", confirmed)
+        with m3:
+            st.metric("待确认", pending)
+        with m4:
+            st.metric("有明确冲突", conflicts)
+
+        st.dataframe(
+            reverse_summary_rows(reverse_results),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("### 逐单查看")
+        for rank, entry in enumerate(reverse_results, start=1):
+            parsed = entry["parsed"]
+            item = entry["match"]
+            title = order_title(parsed, rank)
+            with st.expander(f"{rank}. {title} · {item['score']}% · {status_text(item['status'])}"):
+                render_parsed_order_compact(parsed)
+                render_compact_candidate(1, item)
+                with st.expander("查看原始订单"):
+                    st.write(parsed.get("original_request", ""))
 
 
 # ============================================================
-# 13. RESULTS
-# ============================================================
-
-if results is not None:
-    st.divider()
-    st.markdown('<div class="section-title">3. 推荐老师</div>', unsafe_allow_html=True)
-
-    confirmed = sum(1 for item in results if item["status"] == "confirmed")
-    pending = sum(1 for item in results if item["status"] == "pending")
-    conflicts = sum(1 for item in results if item["status"] == "conflict")
-    best = results[0]["score"] if results else 0
-
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("候选人数", len(results))
-    with m2:
-        st.metric("硬条件已确认匹配", confirmed)
-    with m3:
-        st.metric("需要人工确认", pending)
-    with m4:
-        st.metric("最高岗位匹配度", f"{best}%")
-
-    if conflicts:
-        st.caption(f"另外有 {conflicts} 位候选人存在已确认的岗位硬条件冲突。")
-
-    for index, item in enumerate(results, start=1):
-        render_teacher_card(index, item)
-
-
-# ============================================================
-# 14. FOOTER
+# 15. FOOTER
 # ============================================================
 
 st.divider()
-st.caption("Teacher Matching System V1.3 · 自动评分仅使用岗位相关资格、能力与工作条件；个人属性要求仅供人工复核。")
+st.caption(
+    "Teacher Matching System V1.4 · 单个订单、批量订单、老师反向匹配。"
+    "自动评分只使用岗位相关资格、能力与工作条件；个人属性要求仅供人工复核。"
+)
