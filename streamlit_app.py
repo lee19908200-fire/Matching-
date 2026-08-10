@@ -1,9 +1,9 @@
 # ============================================================
-# AI Teacher Matching System V1.8
+# AI Teacher Matching System V1.9
 # Single-file Streamlit app
 #
 # Goals
-# - Support -order, AI-normalized mixed-platform batch orders, and teacher-to-orders matching
+# - Support single-order, AI-normalized mixed-platform batch orders, and teacher-to-orders matching
 # - Normalize mixed-platform employer text to a canonical editable order format before matching
 # - Read teachers from Baserow and rank them against one or many confirmed standard orders
 # - Match only job-relevant qualifications / work conditions
@@ -13,6 +13,9 @@
 # - Treat missing teacher data as "待确认", not as automatic failure.
 # - Unknown hard conditions reduce the displayed match score, so pending candidates cannot show misleading 100%.
 # - Child age is a reference-fit signal only, not a hard rejection.
+# - Ordinary driving/pickup duty is counted once via Driving; explicit pickup experience is separate.
+# - Classified experience years support teaching/training, nanny educator, and high-end family work.
+# - Pending candidates with zero confirmed hard-condition evidence display “资料不足”, not 0%.
 # ============================================================
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from google.genai import types
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V1.8",
+    page_title="AI Teacher Matching System V1.9",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -166,6 +169,7 @@ ALLOWED_MATCH_FIELDS = {
     "Minimum Years of Relevant Experience",
     "Minimum Years of Teaching / Training Experience",
     "Minimum Years of Nanny Educator Experience",
+    "Minimum Years of High-end Family Experience",
     "Subjects",
     "Curriculum",
     "Early Years Experience",
@@ -480,6 +484,7 @@ AUTOMATED MATCHING FIELDS ALLOWED IN hard_requirements / preferred_requirements:
 - Minimum Years of Relevant Experience: number
 - Minimum Years of Teaching / Training Experience: number
 - Minimum Years of Nanny Educator Experience: number
+- Minimum Years of High-end Family Experience: number
 - Subjects: array
 - Curriculum: array
 - Early Years Experience: boolean
@@ -529,11 +534,12 @@ INTERPRETATION RULES:
 8. 蒙氏 / Montessori -> Montessori Experience=true. If a Montessori certificate is explicitly required, also put it in Required Certificates.
 9. 国际学校经历 -> International School Experience=true. 孩子就读国际学校 alone does NOT prove teacher experience; it can remain order context.
 10. 幼儿园工作经历 -> Kindergarten Experience=true. If it says 幼儿园经历优先, put it in preferred_requirements.
-11. 有真实上户经历 / 陪伴师经历 / 儿陪师经历 / 育儿师经历 -> Nanny Educator Experience=true. If a number of years is stated, also set Minimum Years of Relevant Experience.
+11. 有真实上户经历 / 陪伴师经历 / 儿陪师经历 / 育儿师经历 -> Nanny Educator Experience=true. If the stated years specifically refer to 儿陪/陪伴师/育儿/教育管家, use Minimum Years of Nanny Educator Experience. If the text only says generic relevant experience years, use Minimum Years of Relevant Experience.
+11A. 教培/教学/学校教学 X 年 -> Minimum Years of Teaching / Training Experience=X. 高端/高净值家庭 X 年 -> High-end Family Experience=true and Minimum Years of High-end Family Experience=X.
 12. ADHD / SEN child, when the teacher is expected to support that need -> SEN / ADHD Experience=true.
 13. 全科辅导 -> General Tutoring Experience=true.
 14. 家校对接 / 家校沟通 -> Family-School Communication Required=true.
-15. 开车接送 / 熟练驾驶 -> Driving Required=true; 接送孩子 -> School Pick-up Required=true when driving/pickup is part of the job.
+15. 开车接送 / 熟练驾驶 / 负责接送孩子 -> Driving Required=true. Ordinary pickup/dropoff DUTY must NOT also create School Pick-up Required. Only when the employer explicitly requires prior/professional pickup-driver experience (e.g. “有接送孩子经验/有司机经验/有接送工作经验”) set School Pick-up Required=true.
 16. 跟随老板出差 -> Willing to Travel=true.
 17. 辅食 -> Baby Food Required=true. 做饭/家常菜 -> Cooking Required=true. 家务/收纳 -> Housekeeping Required=true.
 18. 营养搭配 -> Nutrition Planning=true.
@@ -675,7 +681,12 @@ def normalize_requirement_group(group: Any) -> Tuple[Dict[str, Any], List[str]]:
             degree = normalize_degree(value)
             if degree:
                 normalized[field] = degree
-        elif field == "Minimum Years of Relevant Experience":
+        elif field in {
+            "Minimum Years of Relevant Experience",
+            "Minimum Years of Teaching / Training Experience",
+            "Minimum Years of Nanny Educator Experience",
+            "Minimum Years of High-end Family Experience",
+        }:
             number = to_number(value)
             if number is not None:
                 normalized[field] = number
@@ -977,6 +988,7 @@ FIELD_LABELS = {
     "Minimum Years of Relevant Experience": "最低相关经验年限",
     "Minimum Years of Teaching / Training Experience": "最低教培/教学经验年限",
     "Minimum Years of Nanny Educator Experience": "最低儿陪/教育管家经验年限",
+    "Minimum Years of High-end Family Experience": "最低高端家庭经验年限",
     "Subjects": "教学/辅导方向",
     "Curriculum": "课程体系",
     "Early Years Experience": "早教经验",
@@ -991,7 +1003,7 @@ FIELD_LABELS = {
     "Cooking Required": "烹饪",
     "Baby Food Required": "辅食制作",
     "Housekeeping Required": "家务/收纳",
-    "School Pick-up Required": "接送孩子",
+    "School Pick-up Required": "接送工作经验",
     "Family-School Communication Required": "家校沟通",
     "General Tutoring Experience": "全科辅导经验",
     "Child Psychology Experience": "儿童心理相关经验",
@@ -1016,7 +1028,7 @@ TEACHER_FIELD_MAP = {
     "Cooking Required": "Cooking",
     "Baby Food Required": "Baby Food",
     "Housekeeping Required": "Housekeeping",
-    "School Pick-up Required": "School Pick-up",
+    "School Pick-up Required": "School Pick-up Experience",
     "Family-School Communication Required": "Family-School Communication",
     "General Tutoring Experience": "General Tutoring Experience",
     "Child Psychology Experience": "Child Psychology Experience",
@@ -1113,6 +1125,15 @@ def match_subset(actual_values: List[str], required_values: List[str]) -> str:
     return MATCH if required.issubset(actual) else CONFLICT
 
 
+def teacher_years_from_fields(teacher: Dict[str, Any], fields: Iterable[str]) -> Optional[float]:
+    """Return the first explicit numeric experience-year value found in Baserow."""
+    for candidate_field in fields:
+        actual = to_number(teacher.get(candidate_field))
+        if actual is not None:
+            return actual
+    return None
+
+
 def evaluate_requirement(teacher: Dict[str, Any], field: str, expected: Any) -> str:
     if field == "Working Cities":
         required = [normalize_city(x) for x in ensure_list(expected)]
@@ -1164,12 +1185,29 @@ def evaluate_requirement(teacher: Dict[str, Any], field: str, expected: Any) -> 
             return UNKNOWN
         return MATCH if DEGREE_RANK[actual] >= DEGREE_RANK[required] else CONFLICT
 
-    if field in {
-        "Minimum Years of Relevant Experience",
-        "Minimum Years of Teaching / Training Experience",
-    }:
+    if field == "Minimum Years of Relevant Experience":
         required = to_number(expected)
-        actual = to_number(teacher.get("Years of Teaching"))
+        actual = teacher_years_from_fields(
+            teacher,
+            ["Relevant Experience Years", "Years of Relevant Experience", "Years of Teaching"],
+        )
+        if required is None:
+            return NOT_APPLICABLE
+        if actual is None:
+            return UNKNOWN
+        return MATCH if actual >= required else CONFLICT
+
+    if field == "Minimum Years of Teaching / Training Experience":
+        required = to_number(expected)
+        actual = teacher_years_from_fields(
+            teacher,
+            [
+                "Teaching / Training Experience Years",
+                "Teaching Experience Years",
+                "Training Experience Years",
+                "Years of Teaching",
+            ],
+        )
         if required is None:
             return NOT_APPLICABLE
         if actual is None:
@@ -1181,27 +1219,50 @@ def evaluate_requirement(teacher: Dict[str, Any], field: str, expected: Any) -> 
         if required is None:
             return NOT_APPLICABLE
 
-        actual = None
-        for candidate_field in [
-            "Nanny Educator Years",
-            "Nanny Educator Experience Years",
-            "Years of Nanny Educator Experience",
-            "Years of Nanny Educator",
-        ]:
-            actual = to_number(teacher.get(candidate_field))
-            if actual is not None:
-                break
-
+        actual = teacher_years_from_fields(
+            teacher,
+            [
+                "Nanny Educator Experience Years",
+                "Nanny Educator Years",
+                "Years of Nanny Educator Experience",
+                "Years of Nanny Educator",
+            ],
+        )
         if actual is not None:
             return MATCH if actual >= required else CONFLICT
 
+        # We know the teacher has this type of experience, but without a separate
+        # numeric field we cannot safely invent the number of years.
         nanny_state = boolish(teacher.get("Nanny Educator Experience"))
-        if nanny_state is True:
+        if nanny_state is True or evidence_keyword_match(
+            teacher,
+            ["教育管家", "儿陪师", "陪伴师", "育儿师", "育婴师", "nanny educator"],
+        ):
             return UNKNOWN
+        return UNKNOWN
 
-        if evidence_keyword_match(teacher, ["教育管家", "儿陪师", "陪伴师", "育儿师", "育婴师", "nanny educator"]):
+    if field == "Minimum Years of High-end Family Experience":
+        required = to_number(expected)
+        if required is None:
+            return NOT_APPLICABLE
+
+        actual = teacher_years_from_fields(
+            teacher,
+            [
+                "High-end Family Experience Years",
+                "High-end Family Years",
+                "Years of High-end Family Experience",
+            ],
+        )
+        if actual is not None:
+            return MATCH if actual >= required else CONFLICT
+
+        high_end_state = boolish(teacher.get("High-end Family Experience"))
+        if high_end_state is True or evidence_keyword_match(
+            teacher,
+            ["高净值家庭", "高端家庭", "private family"],
+        ):
             return UNKNOWN
-
         return UNKNOWN
 
     if field == "Subjects":
@@ -1616,7 +1677,7 @@ def render_teacher_card(rank: int, item: Dict[str, Any]) -> None:
             else:
                 st.error("❌ 存在已确认的岗位硬条件冲突")
         with right:
-            st.metric("岗位匹配度", f"{item['score']}%")
+            st.metric("岗位匹配度", score_text(item))
             st.caption(f"硬条件资料确认度：{item['confirmation']}%")
 
         c1, c2, c3 = st.columns(3)
@@ -1627,6 +1688,24 @@ def render_teacher_card(rank: int, item: Dict[str, Any]) -> None:
             st.write("**当前所在地：**", current or "未填写")
             st.write("**最高学历：**", teacher.get("Highest Degree") or "未填写")
             st.write("**相关经验年限：**", format_number(teacher.get("Years of Teaching")))
+            teaching_years = teacher_years_from_fields(
+                teacher,
+                ["Teaching / Training Experience Years", "Teaching Experience Years", "Years of Teaching"],
+            )
+            nanny_years = teacher_years_from_fields(
+                teacher,
+                ["Nanny Educator Experience Years", "Nanny Educator Years", "Years of Nanny Educator Experience"],
+            )
+            high_end_years = teacher_years_from_fields(
+                teacher,
+                ["High-end Family Experience Years", "High-end Family Years", "Years of High-end Family Experience"],
+            )
+            if teaching_years is not None:
+                st.write("**教培/教学经验年限：**", format_number(teaching_years))
+            if nanny_years is not None:
+                st.write("**儿陪/教育管家经验年限：**", format_number(nanny_years))
+            if high_end_years is not None:
+                st.write("**高端家庭经验年限：**", format_number(high_end_years))
         with c2:
             st.write("**可接受工作城市：**", format_list(teacher.get("Preferred Cities")))
             min_age = to_number(teacher.get("Minimum Child Age"))
@@ -2020,6 +2099,7 @@ AUTOMATED MATCHING FIELDS ALLOWED IN hard_requirements / preferred_requirements:
 - Minimum Years of Relevant Experience: number
 - Minimum Years of Teaching / Training Experience: number
 - Minimum Years of Nanny Educator Experience: number
+- Minimum Years of High-end Family Experience: number
 - Subjects: array
 - Curriculum: array
 - Early Years Experience: boolean
@@ -2069,11 +2149,12 @@ INTERPRETATION RULES:
 8. 蒙氏 / Montessori -> Montessori Experience=true. If a Montessori certificate is explicitly required, add it to Required Certificates.
 9. 国际学校经历 -> International School Experience=true. A child merely attending an international school is only order context.
 10. 幼儿园工作经历 -> Kindergarten Experience=true. If it says 幼儿园经历优先, put it in preferred_requirements.
-11. 有真实上户经历 / 陪伴师经历 / 儿陪师经历 / 育儿师经历 -> Nanny Educator Experience=true. If a number of years is stated, also set Minimum Years of Relevant Experience.
+11. 有真实上户经历 / 陪伴师经历 / 儿陪师经历 / 育儿师经历 -> Nanny Educator Experience=true. If the stated years specifically refer to 儿陪/陪伴师/育儿/教育管家, use Minimum Years of Nanny Educator Experience. If the text only says generic relevant experience years, use Minimum Years of Relevant Experience.
+11A. 教培/教学/学校教学 X 年 -> Minimum Years of Teaching / Training Experience=X. 高端/高净值家庭 X 年 -> High-end Family Experience=true and Minimum Years of High-end Family Experience=X.
 12. ADHD / SEN child, when the teacher is expected to support that need -> SEN / ADHD Experience=true.
 13. 全科辅导 -> General Tutoring Experience=true.
 14. 家校对接 / 家校沟通 -> Family-School Communication Required=true.
-15. 开车接送 / 熟练驾驶 -> Driving Required=true. 接送孩子 -> School Pick-up Required=true when pickup is part of the job.
+15. 开车接送 / 熟练驾驶 / 负责接送孩子 -> Driving Required=true. Ordinary pickup/dropoff DUTY must NOT also create School Pick-up Required. Only an explicit prior/professional pickup-driver experience requirement creates School Pick-up Required=true.
 16. 跟随老板出差 -> Willing to Travel=true.
 17. 辅食 -> Baby Food Required=true. 做饭/家常菜 -> Cooking Required=true. 家务/收纳 -> Housekeeping Required=true.
 18. 营养搭配 -> Nutrition Planning=true.
@@ -2334,6 +2415,7 @@ AUTOMATED MATCHING FIELDS ALLOWED in hard_requirements / preferred_requirements:
 - Minimum Years of Relevant Experience: number
 - Minimum Years of Teaching / Training Experience: number
 - Minimum Years of Nanny Educator Experience: number
+- Minimum Years of High-end Family Experience: number
 - Subjects: array
 - Curriculum: array
 - Early Years Experience: boolean
@@ -2384,11 +2466,12 @@ INTERPRETATION RULES:
 8. 蒙氏 / Montessori -> Montessori Experience=true. Explicit Montessori certificate requirement -> Required Certificates.
 9. 国际学校经历 -> International School Experience=true. Child attending international school alone is context, not teacher experience.
 10. 幼儿园工作经历 -> Kindergarten Experience=true; "优先" goes to preferred_requirements.
-11. 真实上户/陪伴师/儿陪师/育儿师/教育管家经历 -> Nanny Educator Experience=true. Stated years -> Minimum Years of Relevant Experience.
+11. 真实上户/陪伴师/儿陪师/育儿师/教育管家经历 -> Nanny Educator Experience=true. Years explicitly tied to this work -> Minimum Years of Nanny Educator Experience; generic relevant years -> Minimum Years of Relevant Experience.
+11A. 教培/教学/学校教学 X 年 -> Minimum Years of Teaching / Training Experience=X. 高端/高净值家庭 X 年 -> High-end Family Experience=true and Minimum Years of High-end Family Experience=X.
 12. ADHD / SEN child requiring support -> SEN / ADHD Experience=true.
 13. 全科辅导 -> General Tutoring Experience=true.
 14. 家校对接 / 家校沟通 -> Family-School Communication Required=true.
-15. 熟练驾驶 / 开车接送 -> Driving Required=true; child pickup/dropoff -> School Pick-up Required=true.
+15. 熟练驾驶 / 开车接送 / 接送孩子作为工作内容 -> Driving Required=true. Do NOT duplicate ordinary pickup duty as School Pick-up Required. Set School Pick-up Required=true only when prior/professional pickup-driver experience is explicitly required.
 16. 跟随老板出差 -> Willing to Travel=true.
 17. 辅食 -> Baby Food Required=true; 做饭/家常菜 -> Cooking Required=true; 家务/收纳 -> Housekeeping Required=true.
 18. 营养搭配 -> Nutrition Planning=true.
@@ -2712,6 +2795,23 @@ def order_title(parsed: Dict[str, Any], fallback_index: Optional[int] = None) ->
     return "未命名订单"
 
 
+def is_data_insufficient(item: Dict[str, Any]) -> bool:
+    """No confirmed hard-condition evidence and no hard conflict = insufficient data, not a true 0% fit."""
+    hard = item.get("hard", {})
+    return (
+        item.get("status") == "pending"
+        and not hard.get(MATCH, [])
+        and not hard.get(CONFLICT, [])
+        and bool(hard.get(UNKNOWN, []))
+    )
+
+
+def score_text(item: Dict[str, Any]) -> str:
+    if is_data_insufficient(item):
+        return "资料不足"
+    return f"{int(item.get('score', 0))}%"
+
+
 def status_text(status: str) -> str:
     if status == "confirmed":
         return "✅ 已确认匹配"
@@ -2762,7 +2862,7 @@ def render_compact_candidate(rank: int, item: Dict[str, Any]) -> None:
             st.markdown(f"**{rank}. {item['name']}**")
             st.caption(status_text(item["status"]))
         with c2:
-            st.metric("匹配度", f"{item['score']}%")
+            st.metric("匹配度", score_text(item))
         with c3:
             st.metric("确认度", f"{item['confirmation']}%")
 
@@ -2813,7 +2913,7 @@ def batch_summary_rows(bundle: List[Dict[str, Any]], top_k: int) -> List[Dict[st
             if candidate_index < len(entry["results"]):
                 item = entry["results"][candidate_index]
                 row[f"Top {candidate_index + 1}"] = item["name"]
-                row[f"Top {candidate_index + 1} 匹配度"] = f"{item['score']}%"
+                row[f"Top {candidate_index + 1} 匹配度"] = score_text(item)
                 row[f"Top {candidate_index + 1} 状态"] = status_text(item["status"])
             else:
                 row[f"Top {candidate_index + 1}"] = ""
@@ -2835,7 +2935,7 @@ def reverse_summary_rows(reverse_results: List[Dict[str, Any]]) -> List[Dict[str
                 "订单编号": info.get("Order ID") or "未识别",
                 "城市": format_list(info.get("Working Cities")),
                 "岗位": info.get("Job Type") or "未识别",
-                "匹配度": f"{result['score']}%",
+                "匹配度": score_text(result),
                 "状态": status_text(result["status"]),
                 "硬条件确认度": f"{result['confirmation']}%",
                 "冲突": compact_field_names(result["hard"][CONFLICT]),
@@ -2893,7 +2993,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V1.8 · AI统一订单格式 / 组合条件 / 人工确认 / 本地匹配")
+    st.caption("V1.9 · 去重匹配 / 资料不足 / 分类经验年限")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -2934,7 +3034,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V1.8：不同平台原始订单 → AI统一标准格式 → OR/AND组合条件 → 人工确认 → Python本地匹配。</div>',
+    '<div class="main-subtitle">V1.9：标准订单 → 去重岗位条件 → 分类经验年限 → 资料充分度 → Python本地匹配。</div>',
     unsafe_allow_html=True,
 )
 
@@ -3015,7 +3115,7 @@ if mode == "① 单个订单 → 匹配全部老师":
         confirmed = sum(1 for item in single_results if item["status"] == "confirmed")
         pending = sum(1 for item in single_results if item["status"] == "pending")
         conflicts = sum(1 for item in single_results if item["status"] == "conflict")
-        best = single_results[0]["score"] if single_results else 0
+        best_item = single_results[0] if single_results else None
 
         m1, m2, m3, m4 = st.columns(4)
         with m1:
@@ -3025,7 +3125,7 @@ if mode == "① 单个订单 → 匹配全部老师":
         with m3:
             st.metric("需要人工确认", pending)
         with m4:
-            st.metric("最高匹配度", f"{best}%")
+            st.metric("最高匹配度", score_text(best_item) if best_item else "无")
         if conflicts:
             st.caption(f"另外有 {conflicts} 位候选人存在已确认的岗位硬条件冲突。")
 
@@ -3040,8 +3140,8 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V1.8 使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
-        "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件。"
+        "V1.9 使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
     st.markdown("### 第一步：粘贴不同平台的原始雇主需求")
@@ -3203,7 +3303,7 @@ elif mode == "② 批量订单 → 每单推荐老师":
             parsed = entry["parsed"]
             results = entry["results"]
             label = order_title(parsed, order_index)
-            best_text = f" · Top1 {results[0]['name']} {results[0]['score']}%" if results else ""
+            best_text = f" · Top1 {results[0]['name']} {score_text(results[0])}" if results else ""
             with st.expander(f"{order_index}. {label}{best_text}"):
                 render_parsed_order_compact(parsed)
                 st.markdown("#### 推荐老师")
@@ -3384,7 +3484,7 @@ else:
             parsed = entry["parsed"]
             item = entry["match"]
             title = order_title(parsed, rank)
-            with st.expander(f"{rank}. {title} · {item['score']}% · {status_text(item['status'])}"):
+            with st.expander(f"{rank}. {title} · {score_text(item)} · {status_text(item['status'])}"):
                 render_parsed_order_compact(parsed)
                 render_compact_candidate(1, item)
 
@@ -3395,6 +3495,6 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V1.8 · AI统一订单格式、人工确认、标准订单池、单单/批量/老师反向匹配。"
+    "Teacher Matching System V1.9 · AI统一订单格式、条件去重、分类经验年限、资料不足提示、标准订单池。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；个人属性要求仅供人工复核。"
 )
