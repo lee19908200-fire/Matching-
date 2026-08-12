@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.1
+# AI Teacher Matching System V2.2
 # Single-file Streamlit app
 #
 # Goals
@@ -23,12 +23,29 @@ from __future__ import annotations
 import json
 import math
 import re
+from io import BytesIO
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 import streamlit as st
 from google import genai
 from google.genai import types
+from PIL import Image as PILImage, ImageOps
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.platypus import (
+    Image as RLImage,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 
 # ============================================================
@@ -36,7 +53,7 @@ from google.genai import types
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.1",
+    page_title="AI Teacher Matching System V2.2",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -404,6 +421,439 @@ def check_baserow_connection() -> Dict[str, Any]:
         return {"success": False, "message": f"HTTP {response.status_code}: {response.text[:300]}"}
     except Exception as exc:
         return {"success": False, "message": str(exc)}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_baserow_fields() -> List[Dict[str, Any]]:
+    """Read the current Teachers table schema.
+
+    The schema is used by the teacher-intake workflow so the app only writes
+    field names/types that actually exist in the user's Baserow table.
+    """
+    if not BASEROW_TOKEN:
+        raise RuntimeError("BASEROW_TOKEN 未配置。")
+    if TABLE_ID is None:
+        raise RuntimeError("TABLE_ID 未配置或格式不正确。")
+
+    url = f"{BASEROW_BASE_URL}/api/database/fields/table/{TABLE_ID}/"
+    response = requests.get(
+        url,
+        headers={"Authorization": f"Token {BASEROW_TOKEN}"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Baserow 字段读取失败 HTTP {response.status_code}: {response.text[:600]}"
+        )
+
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise RuntimeError("Baserow 字段接口返回格式异常。")
+    return payload
+
+
+def baserow_field_map() -> Dict[str, Dict[str, Any]]:
+    return {
+        str(field.get("name")): field
+        for field in load_baserow_fields()
+        if field.get("name")
+    }
+
+
+def baserow_patch_row(row_id: Any, data: Dict[str, Any]) -> Dict[str, Any]:
+    if not BASEROW_TOKEN or TABLE_ID is None:
+        raise RuntimeError("Baserow 配置不完整。")
+    if not row_id:
+        raise RuntimeError("老师 Baserow row ID 不存在。")
+    if not data:
+        raise ValueError("没有需要保存的数据。")
+
+    url = f"{BASEROW_BASE_URL}/api/database/rows/table/{TABLE_ID}/{row_id}/"
+    response = requests.patch(
+        url,
+        headers={
+            "Authorization": f"Token {BASEROW_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        params={"user_field_names": "true"},
+        json=data,
+        timeout=REQUEST_TIMEOUT,
+    )
+    if response.status_code not in {200, 201}:
+        raise RuntimeError(
+            f"Baserow 更新失败 HTTP {response.status_code}: {response.text[:1000]}"
+        )
+    return response.json()
+
+
+def baserow_create_row(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not BASEROW_TOKEN or TABLE_ID is None:
+        raise RuntimeError("Baserow 配置不完整。")
+    if not data:
+        raise ValueError("没有可写入的老师数据。")
+
+    url = f"{BASEROW_BASE_URL}/api/database/rows/table/{TABLE_ID}/"
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Token {BASEROW_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        params={"user_field_names": "true"},
+        json=data,
+        timeout=REQUEST_TIMEOUT,
+    )
+    if response.status_code not in {200, 201}:
+        raise RuntimeError(
+            f"Baserow 新增老师失败 HTTP {response.status_code}: {response.text[:1200]}"
+        )
+    return response.json()
+
+
+def baserow_upload_file(
+    file_bytes: bytes,
+    filename: str,
+    mime_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Upload one file to Baserow user-files and return the uploaded file object."""
+    if not BASEROW_TOKEN:
+        raise RuntimeError("BASEROW_TOKEN 未配置。")
+    if not file_bytes:
+        raise ValueError("上传文件为空。")
+
+    url = f"{BASEROW_BASE_URL}/api/user-files/upload-file/"
+    files = {
+        "file": (
+            filename or "teacher_photo.jpg",
+            file_bytes,
+            mime_type or "application/octet-stream",
+        )
+    }
+    response = requests.post(
+        url,
+        headers={"Authorization": f"Token {BASEROW_TOKEN}"},
+        files=files,
+        timeout=REQUEST_TIMEOUT,
+    )
+    if response.status_code not in {200, 201}:
+        raise RuntimeError(
+            f"Baserow 文件上传失败 HTTP {response.status_code}: {response.text[:1000]}"
+        )
+    payload = response.json()
+    if not isinstance(payload, dict) or not payload.get("name"):
+        raise RuntimeError("Baserow 文件上传成功，但没有返回可关联的文件 name。")
+    return payload
+
+
+def select_options_for_field(field_schema: Dict[str, Any]) -> List[str]:
+    options = []
+    for option in field_schema.get("select_options") or []:
+        value = option.get("value") if isinstance(option, dict) else option
+        if value not in (None, ""):
+            options.append(str(value))
+    return options
+
+
+def normalize_date_for_baserow(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    # Accept YYYY-MM-DD directly.
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
+    # Common Chinese / dotted formats.
+    match = re.search(
+        r"(?P<y>\d{4})[./年-](?P<m>\d{1,2})[./月-](?P<d>\d{1,2})",
+        text,
+    )
+    if match:
+        y = int(match.group("y"))
+        m = int(match.group("m"))
+        d = int(match.group("d"))
+        return f"{y:04d}-{m:02d}-{d:02d}"
+    return None
+
+
+def serialize_value_for_baserow(
+    value: Any,
+    field_schema: Dict[str, Any],
+) -> Tuple[Any, Optional[str]]:
+    """Convert Gemini/editor values to Baserow's expected field value shape.
+
+    Returns (serialized_value, warning).  A value of None means skip the field
+    unless the caller intentionally wants to clear it.
+    """
+    if value is None or value == "" or value == [] or value == {}:
+        return None, None
+
+    field_name = str(field_schema.get("name") or "")
+    field_type = str(field_schema.get("type") or "")
+
+    if field_type in {"text", "long_text", "email", "phone_number", "url"}:
+        return str(value).strip(), None
+
+    if field_type in {"number", "rating", "duration"}:
+        number = to_number(value)
+        if number is None:
+            return None, f"{field_name} 无法转换为数字，已跳过。"
+        return int(number) if float(number).is_integer() else float(number), None
+
+    if field_type == "boolean":
+        state = boolish(value)
+        if state is None:
+            return None, None
+        return state, None
+
+    if field_type == "date":
+        normalized = normalize_date_for_baserow(value)
+        if not normalized:
+            return None, f"{field_name} 日期格式无法确认，已跳过。"
+        return normalized, None
+
+    if field_type == "single_select":
+        options = select_options_for_field(field_schema)
+        raw = value.get("value") if isinstance(value, dict) else value
+        raw_text = str(raw).strip()
+        for option in options:
+            if normalize_text(option) == normalize_text(raw_text):
+                return option, None
+        return None, (
+            f"{field_name} 的值「{raw_text}」不在 Baserow 已有选项中，"
+            f"已跳过。可选：{', '.join(options[:20])}"
+        )
+
+    if field_type == "multiple_select":
+        options = select_options_for_field(field_schema)
+        requested = normalize_multi_text(value)
+        accepted: List[str] = []
+        rejected: List[str] = []
+        for item in requested:
+            matched = next(
+                (opt for opt in options if normalize_text(opt) == normalize_text(item)),
+                None,
+            )
+            if matched:
+                accepted.append(matched)
+            else:
+                rejected.append(item)
+        warning = None
+        if rejected:
+            warning = (
+                f"{field_name} 中以下值不在 Baserow 已有选项中，已跳过："
+                + ", ".join(rejected)
+            )
+        return dedupe(accepted), warning
+
+    # File fields are handled by the dedicated uploader.
+    if field_type == "file":
+        return None, None
+
+    # Formula, lookup, link-row and other special fields should not be guessed.
+    return None, f"{field_name} ({field_type}) 不属于自动写入字段类型，已跳过。"
+
+
+def editable_teacher_schema_for_prompt() -> List[Dict[str, Any]]:
+    """Build a compact schema for Gemini teacher-resume parsing."""
+    result: List[Dict[str, Any]] = []
+    supported_types = {
+        "text", "long_text", "number", "boolean", "date",
+        "single_select", "multiple_select", "email",
+        "phone_number", "url",
+    }
+
+    for field in load_baserow_fields():
+        field_type = str(field.get("type") or "")
+        name = str(field.get("name") or "").strip()
+        if not name or field_type not in supported_types:
+            continue
+
+        # These are inserted by the application from source-of-truth data,
+        # not generated by Gemini.
+        if name in {"Original Resume", "Teacher Photo"}:
+            continue
+
+        item: Dict[str, Any] = {
+            "name": name,
+            "type": field_type,
+        }
+        options = select_options_for_field(field)
+        if options:
+            item["allowed_values"] = options
+        if field.get("primary"):
+            item["primary"] = True
+        result.append(item)
+
+    return result[:100]
+
+
+def build_teacher_resume_parser_prompt(original_resume: str) -> str:
+    schema = editable_teacher_schema_for_prompt()
+    resume_text = str(original_resume or "").strip()[:35000]
+
+    return f"""
+You are parsing ONE teacher/caregiver/private-family professional resume into
+the user's existing Baserow Teachers table.
+
+Return JSON only. No markdown fences.
+
+STRICT FACTUALITY:
+- Use only facts explicitly supported by the resume.
+- Do not invent nationality, age, dates, certificates, curriculum knowledge,
+  SEN/ADHD experience, night-care willingness, driving, visa/work authorization,
+  cities, child-age range, or years of experience.
+- You may calculate a duration only when the resume gives sufficiently clear dates.
+  Do not double-count overlapping jobs.
+- Do not create Latin/English names if the resume only provides a Chinese name.
+- "Has a visa" is NOT "has work authorization".
+- Serving a child enrolled in an international school is NOT the same as having
+  worked as an international-school teacher.
+- If a fact is unknown, return null (or [] for list fields).
+- For select fields, use ONLY one of the provided allowed_values.
+- Do not output fields that are not in BASEROW_FIELDS.
+
+RETURN:
+{{
+  "teacher_data": {{
+    "Exact Baserow Field Name": "value"
+  }},
+  "parse_notes": ["important ambiguities or items to confirm"],
+  "source_evidence": {{
+    "Exact Baserow Field Name": "short supporting resume excerpt/paraphrase"
+  }}
+}}
+
+BASEROW_FIELDS:
+{json.dumps(schema, ensure_ascii=False, indent=2)}
+
+ORIGINAL RESUME:
+{resume_text}
+"""
+
+
+def parse_teacher_resume(original_resume: str) -> Tuple[Dict[str, Any], str]:
+    if not str(original_resume or "").strip():
+        raise ValueError("请先粘贴老师完整原始简历。")
+
+    prompt = build_teacher_resume_parser_prompt(original_resume)
+    payload, model_used = generate_json_prompt(prompt)
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Gemini 老师简历解析返回格式异常。")
+
+    teacher_data = payload.get("teacher_data")
+    if not isinstance(teacher_data, dict):
+        raise RuntimeError("Gemini 没有返回 teacher_data JSON object。")
+
+    field_names = {str(field.get("name")) for field in load_baserow_fields()}
+    cleaned = {
+        str(key): value
+        for key, value in teacher_data.items()
+        if str(key) in field_names
+    }
+
+    return {
+        "teacher_data": cleaned,
+        "parse_notes": payload.get("parse_notes") if isinstance(payload.get("parse_notes"), list) else [],
+        "source_evidence": payload.get("source_evidence") if isinstance(payload.get("source_evidence"), dict) else {},
+    }, model_used
+
+
+def prepare_teacher_row_for_baserow(
+    teacher_data: Dict[str, Any],
+    original_resume: str,
+) -> Tuple[Dict[str, Any], List[str]]:
+    """Validate editable JSON against the live Baserow table schema."""
+    schema_map = baserow_field_map()
+    payload: Dict[str, Any] = {}
+    warnings: List[str] = []
+
+    for field_name, value in (teacher_data or {}).items():
+        schema = schema_map.get(str(field_name))
+        if not schema:
+            warnings.append(f"字段 {field_name} 当前不存在于 Baserow，已跳过。")
+            continue
+
+        serialized, warning = serialize_value_for_baserow(value, schema)
+        if warning:
+            warnings.append(warning)
+        if serialized is not None:
+            payload[str(field_name)] = serialized
+
+    # Preserve the exact source resume, not Gemini's rewrite.
+    if "Original Resume" in schema_map:
+        payload["Original Resume"] = str(original_resume or "").strip()
+    else:
+        warnings.append(
+            "Baserow 尚无 Original Resume 字段；本次可保存结构化数据，"
+            "但完整原始简历不会永久入库。"
+        )
+
+    # Populate a blank text primary field from a sensible teacher name if needed.
+    primary_fields = [
+        f for f in schema_map.values()
+        if f.get("primary") and f.get("type") in {"text", "long_text"}
+    ]
+    for primary in primary_fields:
+        primary_name = str(primary.get("name"))
+        if payload.get(primary_name):
+            continue
+
+        first = str(payload.get("First Name") or "").strip()
+        last = str(payload.get("Last Name") or "").strip()
+        chinese = str(payload.get("Chinese Name") or "").strip()
+        candidate_name = " ".join(x for x in [first, last] if x).strip() or chinese
+        if candidate_name:
+            payload[primary_name] = candidate_name
+
+    return payload, warnings
+
+
+def teacher_photo_file(teacher: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for field_name in ["Teacher Photo", "Profile Photo", "Photo", "Image"]:
+        value = teacher.get(field_name)
+        for item in ensure_list(value):
+            if isinstance(item, dict) and (item.get("url") or item.get("name")):
+                return item
+    return None
+
+
+def teacher_photo_url(teacher: Dict[str, Any]) -> Optional[str]:
+    item = teacher_photo_file(teacher)
+    if not item:
+        return None
+    # Prefer original file URL; fall back to the largest available thumbnail.
+    if item.get("url"):
+        return str(item["url"])
+    thumbnails = item.get("thumbnails") or {}
+    for key in ["large", "medium", "small", "tiny"]:
+        thumb = thumbnails.get(key)
+        if isinstance(thumb, dict) and thumb.get("url"):
+            return str(thumb["url"])
+    return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def download_binary_url(url: str) -> bytes:
+    response = requests.get(url, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.content
+
+
+def save_original_resume_for_teacher(
+    teacher: Dict[str, Any],
+    original_resume: str,
+) -> Dict[str, Any]:
+    schema_map = baserow_field_map()
+    if "Original Resume" not in schema_map:
+        raise RuntimeError(
+            "Teachers 表还没有 Original Resume 字段。请先在 Baserow 新增 Long text 字段。"
+        )
+    row_id = teacher.get("Baserow ID")
+    return baserow_patch_row(
+        row_id,
+        {"Original Resume": str(original_resume or "").strip()},
+    )
+
 
 
 # ============================================================
@@ -2971,7 +3421,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.1 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.2 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -2986,6 +3436,8 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
     excluded = {
         "Baserow ID", "Age", "Birth Date", "Date of Birth", "DOB", "Gender",
         "Nationality", "Hometown", "Height", "Weight", "Photo", "Image",
+        "Teacher Photo", "Profile Photo", "Original Resume", "Full Resume",
+        "Resume", "CV", "Resume Text",
     }
     result: Dict[str, Any] = {}
     for key, value in teacher.items():
@@ -3000,7 +3452,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.1 treats ``Original Resume`` as the canonical full-resume field.
+    V2.2 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -3276,6 +3728,332 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
+# 8D. V2.2 PDF RESUME EXPORT
+# ============================================================
+
+
+def register_pdf_cjk_font() -> str:
+    """Use ReportLab's built-in CJK CID font; no external font file is required."""
+    font_name = "STSong-Light"
+    try:
+        pdfmetrics.getFont(font_name)
+    except Exception:
+        pdfmetrics.registerFont(UnicodeCIDFont(font_name))
+    return font_name
+
+
+def clean_markdown_inline(text: str) -> str:
+    value = str(text or "")
+    value = re.sub(r"\*\*(.*?)\*\*", r"\1", value)
+    value = re.sub(r"__(.*?)__", r"\1", value)
+    value = re.sub(r"`([^`]+)`", r"\1", value)
+    value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return value.strip()
+
+
+def prepared_photo_bytes(photo_bytes: bytes) -> Optional[BytesIO]:
+    if not photo_bytes:
+        return None
+    try:
+        with PILImage.open(BytesIO(photo_bytes)) as image:
+            image = image.convert("RGB")
+            image = ImageOps.fit(
+                image,
+                (700, 875),
+                method=PILImage.Resampling.LANCZOS,
+                centering=(0.5, 0.45),
+            )
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=90, optimize=True)
+            output.seek(0)
+            return output
+    except Exception:
+        return None
+
+
+def markdownish_resume_flowables(
+    text: str,
+    body_style: ParagraphStyle,
+    heading_style: ParagraphStyle,
+    subheading_style: ParagraphStyle,
+    bullet_style: ParagraphStyle,
+) -> List[Any]:
+    flowables: List[Any] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            flowables.append(Spacer(1, 2.2 * mm))
+            continue
+
+        if line.startswith("### "):
+            flowables.append(Paragraph(clean_markdown_inline(line[4:]), subheading_style))
+            flowables.append(Spacer(1, 1.2 * mm))
+            continue
+
+        if line.startswith("## "):
+            flowables.append(Paragraph(clean_markdown_inline(line[3:]), heading_style))
+            flowables.append(Spacer(1, 1.5 * mm))
+            continue
+
+        if line.startswith("# "):
+            flowables.append(Paragraph(clean_markdown_inline(line[2:]), heading_style))
+            flowables.append(Spacer(1, 1.5 * mm))
+            continue
+
+        if line.startswith(("•", "-", "*", "·")):
+            content = line.lstrip("•-*· ").strip()
+            if content:
+                flowables.append(
+                    Paragraph("• " + clean_markdown_inline(content), bullet_style)
+                )
+            continue
+
+        flowables.append(Paragraph(clean_markdown_inline(line), body_style))
+
+    return flowables
+
+
+def pdf_evidence_table(
+    evidence_rows: List[Dict[str, str]],
+    font_name: str,
+) -> Optional[Table]:
+    if not evidence_rows:
+        return None
+
+    header_style = ParagraphStyle(
+        "pdf_table_header",
+        fontName=font_name,
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.white,
+    )
+    cell_style = ParagraphStyle(
+        "pdf_table_cell",
+        fontName=font_name,
+        fontSize=8,
+        leading=10.5,
+        textColor=colors.HexColor("#2B2D33"),
+    )
+
+    data = [[
+        Paragraph("岗位要求", header_style),
+        Paragraph("证据状态", header_style),
+        Paragraph("老师简历/资料证据", header_style),
+    ]]
+    for row in evidence_rows[:18]:
+        data.append([
+            Paragraph(clean_markdown_inline(row.get("岗位要求", "")), cell_style),
+            Paragraph(clean_markdown_inline(row.get("证据状态", "")), cell_style),
+            Paragraph(clean_markdown_inline(row.get("老师简历/资料证据", "")), cell_style),
+        ])
+
+    table = Table(
+        data,
+        colWidths=[48 * mm, 24 * mm, 102 * mm],
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333A48")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D7D9DE")),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
+def build_resume_pdf_bytes(
+    teacher_name_text: str,
+    resume_result: Dict[str, Any],
+    tailored_text: str,
+    recommendation_text: str,
+    photo_bytes: Optional[bytes] = None,
+    mode: str = "full",
+) -> bytes:
+    """Create an A4 Chinese PDF using the targeted resume and optional teacher photo."""
+    font_name = register_pdf_cjk_font()
+    output = BytesIO()
+
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+        title=f"{teacher_name_text} 岗位定制简历",
+        author="AI Teacher Matching System",
+    )
+
+    title_style = ParagraphStyle(
+        "pdf_title",
+        fontName=font_name,
+        fontSize=19,
+        leading=24,
+        textColor=colors.HexColor("#252833"),
+        alignment=TA_LEFT,
+        spaceAfter=5,
+    )
+    subtitle_style = ParagraphStyle(
+        "pdf_subtitle",
+        fontName=font_name,
+        fontSize=10.5,
+        leading=15,
+        textColor=colors.HexColor("#5B6070"),
+        alignment=TA_LEFT,
+    )
+    heading_style = ParagraphStyle(
+        "pdf_heading",
+        fontName=font_name,
+        fontSize=13,
+        leading=17,
+        textColor=colors.HexColor("#252833"),
+        spaceBefore=5,
+        spaceAfter=3,
+    )
+    subheading_style = ParagraphStyle(
+        "pdf_subheading",
+        fontName=font_name,
+        fontSize=11,
+        leading=15,
+        textColor=colors.HexColor("#343846"),
+        spaceBefore=3,
+        spaceAfter=2,
+    )
+    body_style = ParagraphStyle(
+        "pdf_body",
+        fontName=font_name,
+        fontSize=9.3,
+        leading=14,
+        textColor=colors.HexColor("#333640"),
+        alignment=TA_LEFT,
+        spaceAfter=2,
+    )
+    bullet_style = ParagraphStyle(
+        "pdf_bullet",
+        fontName=font_name,
+        fontSize=9.3,
+        leading=14,
+        leftIndent=4 * mm,
+        firstLineIndent=-2.5 * mm,
+        textColor=colors.HexColor("#333640"),
+        spaceAfter=1,
+    )
+    small_style = ParagraphStyle(
+        "pdf_small",
+        fontName=font_name,
+        fontSize=8,
+        leading=11,
+        textColor=colors.HexColor("#707684"),
+    )
+
+    story: List[Any] = []
+    headline = str(resume_result.get("resume_title") or "").strip()
+    summary = str(resume_result.get("professional_summary") or "").strip()
+
+    header_parts: List[Any] = [
+        Paragraph(clean_markdown_inline(teacher_name_text), title_style)
+    ]
+    if headline:
+        header_parts.append(Paragraph(clean_markdown_inline(headline), subtitle_style))
+    if summary:
+        header_parts.append(Spacer(1, 2 * mm))
+        header_parts.append(Paragraph(clean_markdown_inline(summary), body_style))
+
+    header_left = header_parts
+    photo_stream = prepared_photo_bytes(photo_bytes or b"")
+    if photo_stream:
+        photo = RLImage(photo_stream, width=31 * mm, height=38.75 * mm)
+        header = Table(
+            [[header_left, photo]],
+            colWidths=[142 * mm, 32 * mm],
+            hAlign="LEFT",
+        )
+        header.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(header)
+    else:
+        story.extend(header_left)
+
+    story.append(Spacer(1, 4 * mm))
+
+    strengths = [
+        str(x).strip()
+        for x in resume_result.get("core_strengths", [])
+        if str(x).strip()
+    ]
+    if strengths:
+        story.append(Paragraph("核心优势", heading_style))
+        for item in strengths[:8]:
+            story.append(Paragraph("• " + clean_markdown_inline(item), bullet_style))
+        story.append(Spacer(1, 2 * mm))
+
+    if mode == "brief":
+        story.append(Paragraph("岗位要求与老师证据", heading_style))
+        evidence_table = pdf_evidence_table(resume_evidence_rows(resume_result), font_name)
+        if evidence_table:
+            story.append(evidence_table)
+            story.append(Spacer(1, 4 * mm))
+
+        if recommendation_text.strip():
+            story.append(Paragraph("候选人推荐语", heading_style))
+            story.append(
+                Paragraph(clean_markdown_inline(recommendation_text.strip()), body_style)
+            )
+
+        questions = [
+            str(x).strip()
+            for x in resume_result.get("questions_to_confirm", [])
+            if str(x).strip()
+        ]
+        if questions:
+            story.append(Spacer(1, 3 * mm))
+            story.append(Paragraph("投递前待确认", heading_style))
+            for item in questions:
+                story.append(Paragraph("• " + clean_markdown_inline(item), bullet_style))
+    else:
+        story.append(Paragraph("岗位定制简历", heading_style))
+        story.extend(
+            markdownish_resume_flowables(
+                tailored_text,
+                body_style,
+                heading_style,
+                subheading_style,
+                bullet_style,
+            )
+        )
+
+        if recommendation_text.strip():
+            story.append(Spacer(1, 4 * mm))
+            story.append(Paragraph("候选人推荐语", heading_style))
+            story.append(
+                Paragraph(clean_markdown_inline(recommendation_text.strip()), body_style)
+            )
+
+    story.append(Spacer(1, 5 * mm))
+    story.append(
+        Paragraph(
+            "本文件由招聘系统根据老师原始简历、结构化资料及目标岗位重新组织生成。"
+            "投递前应由招聘人员完成事实核验。",
+            small_style,
+        )
+    )
+
+    doc.build(story)
+    return output.getvalue()
+
+
+
+# ============================================================
 # 9. VALIDATE CONFIG / LOAD DATA
 # ============================================================
 
@@ -3307,7 +4085,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.1 · 匹配 / 订单定制简历 / 事实校验")
+    st.caption("V2.2 · 匹配 / 订单定制简历 / 事实校验")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -3331,6 +4109,7 @@ with st.sidebar:
     st.metric("老师总数", len(teachers))
     if st.button("刷新老师数据", use_container_width=True):
         load_teachers.clear()
+        load_baserow_fields.clear()
         st.rerun()
 
     st.divider()
@@ -3339,7 +4118,8 @@ with st.sidebar:
         "批量模式：① Gemini 用 1 次请求把不同平台订单统一成标准格式；"
         "② 人工确认；③ Python 本地匹配，0 次额外 Gemini。\n\n"
         "老师反向匹配复用标准订单池：0 次新的 Gemini 请求。\n\n"
-        "岗位定制简历：每次生成使用 1 次 Gemini 请求；只允许重组和突出已有真实经历，不允许虚构。"
+        "岗位定制简历：每次生成使用 1 次 Gemini 请求；只允许重组和突出已有真实经历，不允许虚构。\n\n"
+        "新老师录入：AI解析 1 次；人工确认后写入 Baserow 不再调用 Gemini；照片可保存到 Teacher Photo。"
     )
 
 
@@ -3349,7 +4129,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.1：标准订单 → 老师匹配 → 自动读取 Baserow 原始简历 → 针对目标订单生成真实、可核验的定制简历。</div>',
+    '<div class="main-subtitle">V2.2：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -3360,6 +4140,7 @@ mode = st.radio(
         "② 批量订单 → 每单推荐老师",
         "③ 选择老师 → 匹配全部订单",
         "④ 根据订单优化老师简历",
+        "⑤ 新老师录入 → 保存到 Baserow",
     ],
     horizontal=True,
 )
@@ -3456,7 +4237,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.1 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.2 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -3810,7 +4591,7 @@ elif mode == "③ 选择老师 → 匹配全部订单":
 # 15. MODE 4 - JOB-TARGETED RESUME OPTIMIZATION
 # ============================================================
 
-else:
+elif mode == "④ 根据订单优化老师简历":
     st.markdown('<div class="section-title">根据目标订单优化老师简历</div>', unsafe_allow_html=True)
     st.caption(
         "选择老师和目标订单后，系统会优先从 Baserow 的 Original Resume 自动读取老师完整简历，"
@@ -3830,6 +4611,16 @@ else:
         key="resume_optimizer_teacher_select_v20",
     )
     resume_teacher = teachers[resume_teacher_index]
+
+    photo_url = teacher_photo_url(resume_teacher)
+    if photo_url:
+        pc1, pc2 = st.columns([1, 5])
+        with pc1:
+            st.image(photo_url, width=140, caption="Baserow 老师照片")
+        with pc2:
+            st.success("✅ 已检测到老师照片；生成 PDF 时可以自动带入。")
+    else:
+        st.caption("当前老师没有 Teacher Photo；仍可生成无照片 PDF。")
 
     available_orders = collect_available_standard_orders()
     parsed_target: Optional[Dict[str, Any]] = None
@@ -3962,6 +4753,32 @@ else:
             f"本次将向简历优化模型提供约 {len(original_resume_text):,} 个字符的老师原始简历。"
             "Baserow 结构化字段仍会同时用于事实校验。"
         )
+
+        try:
+            current_field_names = set(baserow_field_map().keys())
+        except Exception:
+            current_field_names = set()
+
+        if "Original Resume" in current_field_names:
+            if st.button(
+                "保存当前原始简历到 Baserow",
+                use_container_width=True,
+                key=f"save_original_resume_v22_{teacher_identity}",
+            ):
+                try:
+                    save_original_resume_for_teacher(
+                        resume_teacher,
+                        original_resume_text,
+                    )
+                    load_teachers.clear()
+                    st.success("✅ Original Resume 已保存到 Baserow。")
+                except Exception as exc:
+                    render_api_error(exc)
+        else:
+            st.caption(
+                "如希望永久保存这份完整简历，请先在 Teachers 表新增 "
+                "`Original Resume`（Long text）字段。"
+            )
     else:
         st.warning(
             "目前没有完整原始简历文本。系统仍可仅根据 Baserow 结构化资料生成保守版，"
@@ -4119,13 +4936,293 @@ else:
                 use_container_width=True,
             )
 
+        st.markdown("### 生成带照片 PDF")
+        include_photo = st.checkbox(
+            "PDF中包含老师照片",
+            value=bool(teacher_photo_url(resume_teacher)),
+            disabled=not bool(teacher_photo_url(resume_teacher)),
+            key=f"resume_pdf_include_photo_v22_{teacher_identity}",
+        )
+
+        pdf_photo_bytes: Optional[bytes] = None
+        if include_photo:
+            try:
+                active_photo_url = teacher_photo_url(resume_teacher)
+                if active_photo_url:
+                    pdf_photo_bytes = download_binary_url(active_photo_url)
+            except Exception as exc:
+                st.warning(f"老师照片暂时无法下载，将生成无照片PDF：{exc}")
+                pdf_photo_bytes = None
+
+        try:
+            full_pdf = build_resume_pdf_bytes(
+                teacher_name_text=result_teacher,
+                resume_result=resume_result,
+                tailored_text=tailored_text,
+                recommendation_text=recommendation_text,
+                photo_bytes=pdf_photo_bytes,
+                mode="full",
+            )
+            brief_pdf = build_resume_pdf_bytes(
+                teacher_name_text=result_teacher,
+                resume_result=resume_result,
+                tailored_text=tailored_text,
+                recommendation_text=recommendation_text,
+                photo_bytes=pdf_photo_bytes,
+                mode="brief",
+            )
+
+            p1, p2 = st.columns(2)
+            with p1:
+                st.download_button(
+                    "下载岗位定制简历 PDF",
+                    data=full_pdf,
+                    file_name=f"{result_teacher}_岗位定制简历.pdf".replace("/", "-"),
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            with p2:
+                st.download_button(
+                    "下载候选人推荐简版 PDF",
+                    data=brief_pdf,
+                    file_name=f"{result_teacher}_候选人推荐简版.pdf".replace("/", "-"),
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+        except Exception as exc:
+            st.warning(f"PDF生成暂时失败：{exc}")
+
 
 # ============================================================
-# 16. FOOTER
+# 16. MODE 5 - NEW TEACHER INTAKE
+# ============================================================
+
+else:
+    st.markdown('<div class="section-title">新老师录入 → 保存到 Baserow</div>', unsafe_allow_html=True)
+    st.caption(
+        "把新老师完整简历粘贴进来，并可上传老师照片。Gemini 只负责把简历解析成当前 Teachers 表已有字段；"
+        "你人工确认/修改后，程序才把数据真正写入 Baserow。Original Resume 保存原文，Teacher Photo 保存照片。"
+    )
+
+    try:
+        intake_schema = load_baserow_fields()
+        intake_field_map = {str(f.get("name")): f for f in intake_schema if f.get("name")}
+    except Exception as exc:
+        st.error("无法读取 Baserow Teachers 字段结构。")
+        st.exception(exc)
+        st.stop()
+
+    required_storage_fields = []
+    if "Original Resume" not in intake_field_map:
+        required_storage_fields.append("Original Resume（Long text）")
+    if "Teacher Photo" not in intake_field_map:
+        required_storage_fields.append("Teacher Photo（File）")
+
+    if required_storage_fields:
+        st.warning(
+            "为了完整使用新老师录入功能，建议在 Teachers 表新增："
+            + "；".join(required_storage_fields)
+            + "。没有这些字段也可以先保存其他结构化资料。"
+        )
+    else:
+        st.success("✅ 已检测到 Original Resume 和 Teacher Photo 字段。")
+
+    st.markdown("### ① 提供老师原始简历与照片")
+    intake_resume = st.text_area(
+        "老师完整原始简历",
+        height=600,
+        key="teacher_intake_resume_v22",
+        placeholder=(
+            "把老师完整简历原文粘贴到这里。\n"
+            "系统会保留原文到 Original Resume，并另外解析学历、城市、语言、驾驶、住家、工作经验等结构化字段。"
+        ),
+    )
+
+    intake_photo = st.file_uploader(
+        "老师照片（可选，JPG / PNG / WEBP）",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=False,
+        key="teacher_intake_photo_v22",
+    )
+    if intake_photo is not None:
+        st.image(intake_photo, width=180, caption="待保存老师照片")
+
+    i1, i2 = st.columns([4, 1])
+    with i1:
+        intake_parse = st.button(
+            "① AI解析老师简历",
+            type="primary",
+            use_container_width=True,
+            key="teacher_intake_parse_v22",
+        )
+    with i2:
+        intake_clear = st.button(
+            "清除录入内容",
+            use_container_width=True,
+            key="teacher_intake_clear_v22",
+        )
+
+    if intake_clear:
+        for key in [
+            "teacher_intake_resume_v22",
+            "teacher_intake_parsed_v22",
+            "teacher_intake_editor_v22",
+            "teacher_intake_model_v22",
+            "teacher_intake_saved_v22",
+        ]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    if intake_parse:
+        if not intake_resume.strip():
+            st.warning("请先粘贴老师完整简历。")
+        else:
+            try:
+                with st.spinner("Gemini 正在按当前 Baserow Teachers 字段解析老师简历..."):
+                    parsed_teacher, model_used = parse_teacher_resume(intake_resume)
+                st.session_state["teacher_intake_parsed_v22"] = parsed_teacher
+                st.session_state["teacher_intake_model_v22"] = model_used
+                st.session_state["teacher_intake_editor_v22"] = json.dumps(
+                    parsed_teacher.get("teacher_data", {}),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
+            except Exception as exc:
+                render_api_error(exc)
+
+    parsed_teacher = st.session_state.get("teacher_intake_parsed_v22")
+    if parsed_teacher:
+        st.divider()
+        st.markdown("### ② 人工检查 / 修改结构化老师资料")
+        st.info(
+            "下面 JSON 的字段名必须保持为 Baserow Teachers 中已有字段。"
+            "Original Resume 不需要写在这里，保存时会自动使用上面的完整原文。"
+        )
+
+        intake_editor = st.text_area(
+            "准备写入 Baserow 的老师字段（可修改）",
+            height=650,
+            key="teacher_intake_editor_v22",
+        )
+
+        parse_notes = [
+            str(x) for x in parsed_teacher.get("parse_notes", [])
+            if str(x).strip()
+        ]
+        if parse_notes:
+            with st.expander("⚠️ AI解析后建议人工确认", expanded=True):
+                for item in parse_notes:
+                    st.warning(item)
+
+        source_evidence = parsed_teacher.get("source_evidence", {})
+        if isinstance(source_evidence, dict) and source_evidence:
+            with st.expander("查看字段来源证据"):
+                rows = [
+                    {"字段": key, "简历证据": value}
+                    for key, value in source_evidence.items()
+                ]
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        try:
+            edited_teacher_data = json.loads(intake_editor) if intake_editor.strip() else {}
+            if not isinstance(edited_teacher_data, dict):
+                raise ValueError("顶层必须是 JSON object。")
+
+            preview_payload, preview_warnings = prepare_teacher_row_for_baserow(
+                edited_teacher_data,
+                intake_resume,
+            )
+
+            st.markdown("#### 保存预览")
+            st.json(preview_payload, expanded=False)
+
+            if preview_warnings:
+                with st.expander("保存前提示", expanded=True):
+                    for warning in preview_warnings:
+                        st.warning(warning)
+
+            st.markdown("### ③ 确认并保存到 Baserow")
+            st.caption(
+                "这一步不会再次调用 Gemini。点击后会新增一位老师；"
+                "如果上传了照片，程序先上传文件，再把文件关联到 Teacher Photo 字段。"
+            )
+
+            save_teacher = st.button(
+                "② 确认老师资料并保存到 Baserow",
+                type="primary",
+                use_container_width=True,
+                key="teacher_intake_save_v22",
+            )
+
+            if save_teacher:
+                try:
+                    final_payload = dict(preview_payload)
+
+                    if intake_photo is not None:
+                        if "Teacher Photo" in intake_field_map:
+                            uploaded = baserow_upload_file(
+                                intake_photo.getvalue(),
+                                intake_photo.name,
+                                intake_photo.type,
+                            )
+                            final_payload["Teacher Photo"] = [{"name": uploaded["name"]}]
+                        else:
+                            st.warning(
+                                "已选择照片，但 Teachers 表没有 Teacher Photo（File）字段，"
+                                "本次不会保存照片。"
+                            )
+
+                    created = baserow_create_row(final_payload)
+                    load_teachers.clear()
+                    load_baserow_fields.clear()
+
+                    saved_name = " ".join(
+                        str(final_payload.get(key) or "").strip()
+                        for key in ["First Name", "Last Name"]
+                    ).strip()
+                    if not saved_name:
+                        saved_name = str(
+                            final_payload.get("Chinese Name")
+                            or final_payload.get("Name")
+                            or "新老师"
+                        )
+
+                    st.session_state["teacher_intake_saved_v22"] = {
+                        "row_id": created.get("id"),
+                        "name": saved_name,
+                    }
+                    st.success(
+                        f"✅ 已保存到 Baserow。老师：{saved_name}；"
+                        f"Row ID：{created.get('id')}。"
+                    )
+                    st.info(
+                        "老师已经进入数据库。点击侧边栏「刷新老师数据」后，"
+                        "即可立即进行订单匹配、反向找订单和生成定制PDF简历。"
+                    )
+                except Exception as exc:
+                    render_api_error(exc)
+
+        except json.JSONDecodeError as exc:
+            st.error(f"结构化老师 JSON 当前无法读取：{exc}")
+        except Exception as exc:
+            st.error(f"老师数据预览失败：{exc}")
+
+    saved_teacher = st.session_state.get("teacher_intake_saved_v22")
+    if saved_teacher:
+        st.caption(
+            f"最近保存：{saved_teacher.get('name')} "
+            f"(Baserow Row ID {saved_teacher.get('row_id')})"
+        )
+
+
+# ============================================================
+# 17. FOOTER
 # ============================================================
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.1 · AI统一订单格式、老师匹配、标准订单池、岗位定制简历与事实校验。"
-    "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
+    "Teacher Matching System V2.2 · AI统一订单格式、老师匹配、老师自动入库、照片管理、岗位定制简历、PDF导出与事实校验。"
+    "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
+    "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
