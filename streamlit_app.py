@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.2.5
+# AI Teacher Matching System V2.3
 # Single-file Streamlit app
 #
 # Goals
@@ -78,20 +78,214 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.2.5",
+    page_title="AI Teacher Matching System V2.3",
     page_icon="🎓",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",
 )
 
 st.markdown(
     """
     <style>
-      .block-container {max-width: 1500px; padding-top: 1.7rem; padding-bottom: 3rem;}
-      .main-title {font-size: 42px; font-weight: 760; margin-bottom: 4px;}
-      .main-subtitle {color: #777; font-size: 16px; margin-bottom: 28px;}
-      .section-title {font-size: 25px; font-weight: 720; margin-top: 12px; margin-bottom: 12px;}
-      .muted {color:#777; font-size: 13px;}
+      /* ---------------------------------------------------------
+         V2.3 responsive layout
+         Desktop remains wide; phones automatically become a
+         single-column, touch-friendly interface.
+         --------------------------------------------------------- */
+      .block-container {
+        max-width: 1500px;
+        padding-top: 1.7rem;
+        padding-bottom: 3rem;
+      }
+
+      .main-title {
+        font-size: 42px;
+        line-height: 1.15;
+        font-weight: 760;
+        margin-bottom: 4px;
+      }
+
+      .main-subtitle {
+        color: #777;
+        font-size: 16px;
+        line-height: 1.55;
+        margin-bottom: 28px;
+      }
+
+      .section-title {
+        font-size: 25px;
+        line-height: 1.25;
+        font-weight: 720;
+        margin-top: 12px;
+        margin-bottom: 12px;
+      }
+
+      .muted {
+        color: #777;
+        font-size: 13px;
+      }
+
+      /* Let long labels and expander titles wrap instead of clipping. */
+      div[data-testid="stExpander"] summary,
+      div[data-testid="stRadio"] label,
+      div[data-testid="stCheckbox"] label {
+        white-space: normal !important;
+      }
+
+      /* Better touch target without changing desktop visual structure much. */
+      div.stButton > button,
+      div[data-testid="stDownloadButton"] > button {
+        min-height: 42px;
+      }
+
+      /* ---------------------------------------------------------
+         Tablet
+         --------------------------------------------------------- */
+      @media (max-width: 1100px) {
+        .block-container {
+          max-width: 100%;
+          padding-left: 1.2rem;
+          padding-right: 1.2rem;
+        }
+
+        .main-title {
+          font-size: 34px;
+        }
+
+        .section-title {
+          font-size: 23px;
+        }
+      }
+
+      /* ---------------------------------------------------------
+         Phone
+         --------------------------------------------------------- */
+      @media (max-width: 768px) {
+        .block-container {
+          max-width: 100%;
+          padding-top: 0.85rem;
+          padding-left: 0.72rem;
+          padding-right: 0.72rem;
+          padding-bottom: 2rem;
+        }
+
+        .main-title {
+          font-size: 29px;
+          line-height: 1.18;
+          margin-bottom: 8px;
+        }
+
+        .main-subtitle {
+          font-size: 14px;
+          line-height: 1.5;
+          margin-bottom: 18px;
+        }
+
+        .section-title {
+          font-size: 22px;
+          line-height: 1.28;
+          margin-top: 8px;
+          margin-bottom: 10px;
+        }
+
+        h1 { font-size: 1.75rem !important; }
+        h2 { font-size: 1.45rem !important; }
+        h3 { font-size: 1.22rem !important; }
+        h4 { font-size: 1.06rem !important; }
+
+        /* Stack every Streamlit column vertically on a phone. */
+        div[data-testid="stHorizontalBlock"] {
+          display: flex !important;
+          flex-direction: column !important;
+          gap: 0.55rem !important;
+        }
+
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+          width: 100% !important;
+          min-width: 0 !important;
+          flex: 1 1 100% !important;
+        }
+
+        /* Mode selector / radio choices become full-width vertical buttons. */
+        div[data-testid="stRadio"] div[role="radiogroup"] {
+          display: flex !important;
+          flex-direction: column !important;
+          gap: 0.38rem !important;
+          width: 100% !important;
+        }
+
+        div[data-testid="stRadio"] div[role="radiogroup"] > label {
+          width: 100% !important;
+          min-height: 44px;
+          padding-top: 0.34rem;
+          padding-bottom: 0.34rem;
+          align-items: flex-start !important;
+        }
+
+        /* iPhone Safari zooms fields whose font is <16px. */
+        textarea,
+        input,
+        div[data-baseweb="select"] input {
+          font-size: 16px !important;
+        }
+
+        textarea {
+          line-height: 1.48 !important;
+        }
+
+        div.stButton > button,
+        div[data-testid="stDownloadButton"] > button {
+          width: 100% !important;
+          min-height: 48px !important;
+          font-size: 16px !important;
+          white-space: normal !important;
+        }
+
+        /* Metrics look like compact mobile cards after column stacking. */
+        div[data-testid="stMetric"] {
+          border: 1px solid rgba(49, 51, 63, 0.12);
+          border-radius: 10px;
+          padding: 0.7rem 0.85rem;
+          background: rgba(248, 249, 251, 0.72);
+        }
+
+        /* Native dataframe remains horizontally scrollable, but fits viewport. */
+        div[data-testid="stDataFrame"] {
+          width: 100% !important;
+          max-width: 100% !important;
+          overflow-x: auto !important;
+        }
+
+        /* File uploader and select boxes should fill the phone width. */
+        div[data-testid="stFileUploader"],
+        div[data-testid="stSelectbox"],
+        div[data-testid="stTextArea"] {
+          width: 100% !important;
+          max-width: 100% !important;
+        }
+
+        /* Sidebar behaves like a phone drawer rather than a desktop panel. */
+        section[data-testid="stSidebar"] {
+          width: min(88vw, 360px) !important;
+          min-width: min(88vw, 360px) !important;
+        }
+
+        /* Make alerts/cards easier to read on narrow screens. */
+        div[data-testid="stAlert"] {
+          font-size: 14px;
+          line-height: 1.5;
+        }
+
+        div[data-testid="stExpander"] {
+          border-radius: 10px;
+        }
+
+        /* Avoid extremely wide embedded images. */
+        div[data-testid="stImage"] img {
+          max-width: 100% !important;
+          height: auto !important;
+        }
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -3442,6 +3636,76 @@ def render_parsed_order_compact(parsed: Dict[str, Any]) -> None:
             st.write(f"**{key}：** {requirement_value(value)}")
 
 
+def render_batch_card_summary(
+    bundle: List[Dict[str, Any]],
+    top_k: int,
+) -> None:
+    """Compact vertical order cards, useful on phones."""
+    if not bundle:
+        return
+
+    for index, entry in enumerate(bundle, start=1):
+        parsed = entry["parsed"]
+        info = parsed.get("order_info", {})
+        results = entry.get("results") or []
+
+        order_id = info.get("Order ID") or "未识别"
+        cities = format_list(info.get("Working Cities"))
+        job_type = info.get("Job Type") or "未识别"
+
+        with st.container(border=True):
+            st.markdown(f"**{index}. {order_id} · {cities} · {job_type}**")
+
+            if not results:
+                st.caption("暂无推荐老师")
+                continue
+
+            for candidate_index, item in enumerate(
+                results[: min(top_k, 3)],
+                start=1,
+            ):
+                st.write(
+                    f"**Top {candidate_index}：{item['name']}** "
+                    f"｜{score_text(item)}｜{status_text(item['status'])}"
+                )
+
+            if len(results) > 3:
+                st.caption(f"另外还有 {len(results) - 3} 位候选人，请在下方逐单详情查看。")
+
+
+def render_reverse_card_summary(
+    reverse_results: List[Dict[str, Any]],
+) -> None:
+    """Phone-friendly vertical summary for one teacher → many orders."""
+    for rank, entry in enumerate(reverse_results, start=1):
+        parsed = entry["parsed"]
+        item = entry["match"]
+        info = parsed.get("order_info", {})
+
+        order_id = info.get("Order ID") or "未识别"
+        cities = format_list(info.get("Working Cities"))
+        job_type = info.get("Job Type") or "未识别"
+
+        with st.container(border=True):
+            st.markdown(f"**{rank}. {order_id} · {cities} · {job_type}**")
+            st.write(
+                f"匹配度：**{score_text(item)}**　"
+                f"状态：**{status_text(item['status'])}**　"
+                f"硬条件确认度：**{item['confirmation']}%**"
+            )
+
+            if item["hard"][CONFLICT]:
+                st.write(
+                    "❌ **冲突：**",
+                    compact_field_names(item["hard"][CONFLICT]),
+                )
+            if item["hard"][UNKNOWN]:
+                st.write(
+                    "⚠️ **待确认：**",
+                    compact_field_names(item["hard"][UNKNOWN]),
+                )
+
+
 def batch_summary_rows(bundle: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for index, entry in enumerate(bundle, start=1):
@@ -3535,7 +3799,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.2.5 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.3 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -3566,7 +3830,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.2.5 treats ``Original Resume`` as the canonical full-resume field.
+    V2.3 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -3886,7 +4150,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.2.5 PDF RESUME EXPORT
+# 8D. V2.3 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -4694,7 +4958,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.2.5 · 匹配 / 订单定制简历 / 事实校验")
+    st.caption("V2.3 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -4722,6 +4986,15 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+    mobile_card_summary = st.toggle(
+        "手机卡片总览",
+        value=True,
+        help="开启后，批量推荐和老师反向匹配会额外显示纵向卡片；手机上更容易查看。电脑端仍保留完整表格。",
+        key="mobile_card_summary_v23",
+    )
+    st.caption("手机端建议保持开启；横向完整表格仍然保留。")
+
+    st.divider()
     st.info(
         "单个订单模式：1 次 Gemini 请求。\n\n"
         "批量模式：① Gemini 用 1 次请求把不同平台订单统一成标准格式；"
@@ -4738,7 +5011,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.2.5：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.3：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -4846,7 +5119,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.2.5 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.3 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -4929,6 +5202,7 @@ elif mode == "② 批量订单 → 每单推荐老师":
                 f"当前标准订单框中共有 **{len(current_parsed_orders)} 条独立订单**。"
                 "此处只是 Python 本地读取，没有新增 Gemini 请求。"
             )
+            st.caption("手机端：下方横向表格可以左右滑动；也可以直接使用“逐条查看标准订单”。")
             st.dataframe(
                 standardized_preview_rows(current_parsed_orders),
                 use_container_width=True,
@@ -4998,11 +5272,20 @@ elif mode == "② 批量订单 → 每单推荐老师":
 
     if batch_bundle:
         st.markdown("### 批量推荐总览")
-        st.dataframe(
-            batch_summary_rows(batch_bundle, saved_top_k),
-            use_container_width=True,
-            hide_index=True,
-        )
+
+        if mobile_card_summary:
+            st.caption("手机卡片总览：每单先显示 Top 3；完整 Top N 和横向表格仍可继续查看。")
+            render_batch_card_summary(batch_bundle, saved_top_k)
+
+        with st.expander(
+            "查看完整横向推荐表格（电脑端更适合）",
+            expanded=not mobile_card_summary,
+        ):
+            st.dataframe(
+                batch_summary_rows(batch_bundle, saved_top_k),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         st.markdown("### 每条订单详细结果")
         for order_index, entry in enumerate(batch_bundle, start=1):
@@ -5179,11 +5462,19 @@ elif mode == "③ 选择老师 → 匹配全部订单":
         with m4:
             st.metric("有明确冲突", conflicts)
 
-        st.dataframe(
-            reverse_summary_rows(reverse_results),
-            use_container_width=True,
-            hide_index=True,
-        )
+        if mobile_card_summary:
+            st.caption("手机卡片总览：按订单纵向显示匹配度、状态、冲突和待确认。")
+            render_reverse_card_summary(reverse_results)
+
+        with st.expander(
+            "查看完整横向订单表格（电脑端更适合）",
+            expanded=not mobile_card_summary,
+        ):
+            st.dataframe(
+                reverse_summary_rows(reverse_results),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         st.markdown("### 逐单查看")
         for rank, entry in enumerate(reverse_results, start=1):
@@ -5863,7 +6154,7 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.2.5 · AI统一订单格式、老师匹配、老师自动入库、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.3 · 电脑/手机自适应、AI统一订单格式、老师匹配、老师自动入库、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
