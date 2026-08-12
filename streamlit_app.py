@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.2.2
+# AI Teacher Matching System V2.2.3
 # Single-file Streamlit app
 #
 # Goals
@@ -78,7 +78,7 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.2.2",
+    page_title="AI Teacher Matching System V2.2.3",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -916,6 +916,104 @@ def list_generate_models(client: genai.Client) -> List[str]:
     return dedupe(result)
 
 
+def is_transient_gemini_error(exc: Exception) -> bool:
+    text = str(exc)
+    upper = text.upper()
+    transient_markers = [
+        "500",
+        "503",
+        "504",
+        "INTERNAL",
+        "UNAVAILABLE",
+        "DEADLINE_EXCEEDED",
+        "SERVERERROR",
+        "TIMEOUT",
+        "TIMED OUT",
+    ]
+    return any(marker in upper for marker in transient_markers)
+
+
+def is_gemini_not_found_error(exc: Exception) -> bool:
+    text = str(exc)
+    lower = text.lower()
+    return (
+        "404" in text
+        or "NOT_FOUND" in text
+        or "not available" in lower
+        or "model_not_found" in lower
+    )
+
+
+def generate_content_resilient(
+    client: genai.Client,
+    prompt: str,
+    preferred_model: Optional[str] = None,
+) -> Tuple[Any, str]:
+    """
+    Generate JSON with a conservative model fallback.
+
+    The google-genai SDK already retries transient 429/5xx errors internally.
+    This helper adds ONE model fallback only for persistent 5xx/model-unavailable
+    failures, so a temporary problem with one model does not crash the Streamlit app.
+    """
+    preferred = str(preferred_model or GEMINI_MODEL).strip()
+    attempted: List[str] = []
+    first_error: Optional[Exception] = None
+
+    def call(model_name: str):
+        return client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            ),
+        )
+
+    candidates = [preferred]
+
+    try:
+        available = list_generate_models(client)
+        flash_alternatives = [
+            model
+            for model in available
+            if "flash" in model.lower() and model != preferred
+        ]
+        # Only one fallback model is attempted to control quota/cost.
+        if flash_alternatives:
+            candidates.append(flash_alternatives[0])
+    except Exception:
+        pass
+
+    for model_name in dedupe(candidates):
+        attempted.append(model_name)
+        try:
+            response = call(model_name)
+            return response, model_name
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+
+            # Do not silently hop models for quota/auth/client-data problems.
+            # Only model-not-found or persistent server-side 5xx failures qualify.
+            if not (
+                is_gemini_not_found_error(exc)
+                or is_transient_gemini_error(exc)
+            ):
+                raise
+
+            # Continue only if there is another candidate.
+            continue
+
+    attempted_text = ", ".join(attempted) or preferred
+    raise RuntimeError(
+        "GEMINI_TEMPORARY_UNAVAILABLE: Gemini 服务端暂时无法完成请求。"
+        f"已尝试模型：{attempted_text}。"
+        "订单/Baserow 数据没有丢失，请稍后重试；"
+        "如果目标订单已经在标准订单池中，请直接使用标准订单池，"
+        "该步骤无需再次调用 Gemini。"
+    ) from first_error
+
+
 def build_parser_prompt(employer_request: str) -> str:
     return f"""
 You parse ONE private-family recruitment order into structured JSON.
@@ -1336,30 +1434,11 @@ def parse_employer_order(employer_request: str) -> Dict[str, Any]:
 
     client = gemini_client()
     prompt = build_parser_prompt(request_text)
-
-    def generate(model_name: str):
-        return client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
-
-    model_used = GEMINI_MODEL
-    try:
-        response = generate(model_used)
-    except Exception as first_exc:
-        # If the configured model was removed/unavailable, try one available Flash model once.
-        text = str(first_exc)
-        if "404" in text or "NOT_FOUND" in text or "not available" in text.lower():
-            models = list_generate_models(client)
-            alternatives = [m for m in models if "flash" in m.lower() and m != model_used]
-            if alternatives:
-                model_used = alternatives[0]
-                response = generate(model_used)
-            else:
-                raise
-        else:
-            raise
+    response, model_used = generate_content_resilient(
+        client,
+        prompt,
+        preferred_model=GEMINI_MODEL,
+    )
 
     if not getattr(response, "text", None):
         raise RuntimeError("Gemini 返回了响应，但没有文本内容。")
@@ -2714,29 +2793,11 @@ def generate_json_prompt(prompt: str) -> Tuple[Dict[str, Any], str]:
     bare top-level array, because Gemini may occasionally omit the wrapper.
     """
     client = gemini_client()
-
-    def generate(model_name: str):
-        return client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
-
-    model_used = GEMINI_MODEL
-    try:
-        response = generate(model_used)
-    except Exception as first_exc:
-        text = str(first_exc)
-        if "404" in text or "NOT_FOUND" in text or "not available" in text.lower():
-            models = list_generate_models(client)
-            alternatives = [m for m in models if "flash" in m.lower() and m != model_used]
-            if alternatives:
-                model_used = alternatives[0]
-                response = generate(model_used)
-            else:
-                raise
-        else:
-            raise
+    response, model_used = generate_content_resilient(
+        client,
+        prompt,
+        preferred_model=GEMINI_MODEL,
+    )
 
     if not getattr(response, "text", None):
         raise RuntimeError("Gemini 返回了响应，但没有文本内容。")
@@ -3431,14 +3492,42 @@ def reverse_summary_rows(reverse_results: List[Dict[str, Any]]) -> List[Dict[str
 def render_api_error(exc: Exception) -> None:
     text = str(exc)
     lower = text.lower()
+    upper = text.upper()
+
     if "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in lower or "rate limit" in lower:
         st.error("Gemini API 当前额度已达到限制。")
-        st.warning("请等待额度恢复或调整 Gemini API 计费/额度后再次运行。Baserow 老师数据不受影响。")
+        st.warning(
+            "请等待额度恢复或调整 Gemini API 计费/额度后再次运行。"
+            "Baserow 老师数据和已经确认的标准订单不受影响。"
+        )
+    elif (
+        "GEMINI_TEMPORARY_UNAVAILABLE" in text
+        or "SERVERERROR" in upper
+        or "500" in text
+        or "503" in text
+        or "504" in text
+        or "INTERNAL" in upper
+        or "UNAVAILABLE" in upper
+        or "DEADLINE_EXCEEDED" in upper
+    ):
+        st.error("Gemini 服务端暂时不可用或处理超时。")
+        st.warning(
+            "这不是 Baserow、老师照片或 PDF 的错误。"
+            "系统已执行 SDK 自动重试，并会尝试一个可用的 Flash 备用模型。"
+            "如果仍失败，请稍后再点一次。"
+        )
+        st.info(
+            "如果这条目标订单已经在「标准订单池」里，请直接选择标准订单池。"
+            "老师匹配和基于已标准化订单的反向匹配不需要重新调用 Gemini。"
+        )
     elif isinstance(exc, ValueError):
         st.warning(text)
     elif "json" in lower and ("gemini" in lower or "格式" in text or "不完整" in text):
         st.error("Gemini 返回的结构化结果不完整。")
-        st.info("请重新运行一次。批量模式会自动分成小批次解析，避免一次返回太长导致 JSON 截断。")
+        st.info(
+            "请重新运行一次。批量模式会自动分成小批次解析，"
+            "避免一次返回太长导致 JSON 截断。"
+        )
     else:
         st.error("处理过程中发生错误。")
         st.exception(exc)
@@ -3446,7 +3535,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.2.2 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.2.3 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -3477,7 +3566,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.2.2 treats ``Original Resume`` as the canonical full-resume field.
+    V2.2.3 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -3755,7 +3844,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.2.2 PDF RESUME EXPORT
+# 8D. V2.2.3 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -4306,7 +4395,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.2.2 · 匹配 / 订单定制简历 / 事实校验")
+    st.caption("V2.2.3 · 匹配 / 订单定制简历 / 事实校验")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -4350,7 +4439,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.2.2：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.2.3：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -4458,7 +4547,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.2.2 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.2.3 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -4871,7 +4960,7 @@ elif mode == "④ 根据订单优化老师简历":
         resume_raw_order = st.text_area(
             "粘贴 1 条目标雇主需求",
             height=220,
-            placeholder="粘贴一条雇主订单。这里会调用 Gemini 解析 1 次，然后可用于简历优化。",
+            placeholder="粘贴一条新的雇主订单。这里会调用 Gemini 解析 1 次。若订单已在标准订单池中，请直接选择标准订单池（0次新的Gemini解析）。",
             key="resume_optimizer_raw_order_v20",
         )
         p1, p2 = st.columns([4, 1])
@@ -5455,7 +5544,7 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.2.2 · AI统一订单格式、老师匹配、老师自动入库、照片管理、岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.2.3 · AI统一订单格式、老师匹配、老师自动入库、照片管理、岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
