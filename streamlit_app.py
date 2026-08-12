@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.3
+# AI Teacher Matching System V2.3.3
 # Single-file Streamlit app
 #
 # Goals
@@ -78,17 +78,17 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.3",
+    page_title="AI Teacher Matching System V2.3.3",
     page_icon="🎓",
     layout="wide",
-    initial_sidebar_state="auto",
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown(
     """
     <style>
       /* ---------------------------------------------------------
-         V2.3 responsive layout
+         V2.3.3 responsive layout
          Desktop remains wide; phones automatically become a
          single-column, touch-friendly interface.
          --------------------------------------------------------- */
@@ -161,43 +161,80 @@ st.markdown(
          Phone
          --------------------------------------------------------- */
       @media (max-width: 768px) {
+        html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+          width: 100% !important;
+          max-width: 100% !important;
+          overflow-x: hidden !important;
+        }
+
+        /*
+          iPhone Safari can leave a visible Streamlit sidebar strip even when
+          the sidebar is "collapsed". On phones we remove the sidebar/drawer
+          from the layout entirely so it can never cover the main page.
+        */
+        section[data-testid="stSidebar"] {
+          display: none !important;
+          visibility: hidden !important;
+          width: 0 !important;
+          min-width: 0 !important;
+          max-width: 0 !important;
+          flex: 0 0 0 !important;
+          transform: translateX(-110%) !important;
+          pointer-events: none !important;
+        }
+
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="collapsedControl"] {
+          display: none !important;
+          visibility: hidden !important;
+        }
+
+        [data-testid="stMain"],
+        [data-testid="stAppViewContainer"] {
+          margin-left: 0 !important;
+          padding-left: 0 !important;
+          left: 0 !important;
+          width: 100% !important;
+          max-width: 100% !important;
+        }
+
         .block-container {
           max-width: 100%;
-          padding-top: 0.85rem;
-          padding-left: 0.72rem;
-          padding-right: 0.72rem;
-          padding-bottom: 2rem;
+          padding-top: 0.5rem;
+          padding-left: 0.58rem;
+          padding-right: 0.58rem;
+          padding-bottom: 1.4rem;
         }
 
         .main-title {
-          font-size: 29px;
+          font-size: 24px;
           line-height: 1.18;
-          margin-bottom: 8px;
+          margin-bottom: 5px;
         }
 
         .main-subtitle {
-          font-size: 14px;
+          font-size: 13px;
           line-height: 1.5;
-          margin-bottom: 18px;
+          margin-bottom: 12px;
         }
 
         .section-title {
-          font-size: 22px;
+          font-size: 19px;
           line-height: 1.28;
-          margin-top: 8px;
-          margin-bottom: 10px;
+          margin-top: 5px;
+          margin-bottom: 7px;
         }
 
-        h1 { font-size: 1.75rem !important; }
-        h2 { font-size: 1.45rem !important; }
-        h3 { font-size: 1.22rem !important; }
-        h4 { font-size: 1.06rem !important; }
+        h1 { font-size: 1.45rem !important; }
+        h2 { font-size: 1.25rem !important; }
+        h3 { font-size: 1.08rem !important; }
+        h4 { font-size: 0.98rem !important; }
 
         /* Stack every Streamlit column vertically on a phone. */
         div[data-testid="stHorizontalBlock"] {
           display: flex !important;
           flex-direction: column !important;
-          gap: 0.55rem !important;
+          gap: 0.35rem !important;
         }
 
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
@@ -210,16 +247,22 @@ st.markdown(
         div[data-testid="stRadio"] div[role="radiogroup"] {
           display: flex !important;
           flex-direction: column !important;
-          gap: 0.38rem !important;
+          gap: 0.24rem !important;
           width: 100% !important;
         }
 
         div[data-testid="stRadio"] div[role="radiogroup"] > label {
           width: 100% !important;
-          min-height: 44px;
-          padding-top: 0.34rem;
-          padding-bottom: 0.34rem;
+          min-height: 38px;
+          padding: 0.24rem 0.18rem !important;
+          margin: 0 !important;
           align-items: flex-start !important;
+          box-sizing: border-box !important;
+        }
+
+        div[data-testid="stRadio"] div[role="radiogroup"] {
+          padding-left: 0 !important;
+          margin-left: 0 !important;
         }
 
         /* iPhone Safari zooms fields whose font is <16px. */
@@ -236,16 +279,16 @@ st.markdown(
         div.stButton > button,
         div[data-testid="stDownloadButton"] > button {
           width: 100% !important;
-          min-height: 48px !important;
-          font-size: 16px !important;
+          min-height: 42px !important;
+          font-size: 15px !important;
           white-space: normal !important;
         }
 
         /* Metrics look like compact mobile cards after column stacking. */
         div[data-testid="stMetric"] {
           border: 1px solid rgba(49, 51, 63, 0.12);
-          border-radius: 10px;
-          padding: 0.7rem 0.85rem;
+          border-radius: 8px;
+          padding: 0.5rem 0.6rem;
           background: rgba(248, 249, 251, 0.72);
         }
 
@@ -264,20 +307,16 @@ st.markdown(
           max-width: 100% !important;
         }
 
-        /* Sidebar behaves like a phone drawer rather than a desktop panel. */
-        section[data-testid="stSidebar"] {
-          width: min(88vw, 360px) !important;
-          min-width: min(88vw, 360px) !important;
-        }
-
         /* Make alerts/cards easier to read on narrow screens. */
         div[data-testid="stAlert"] {
-          font-size: 14px;
-          line-height: 1.5;
+          font-size: 13px;
+          line-height: 1.42;
+          padding-top: 0.45rem !important;
+          padding-bottom: 0.45rem !important;
         }
 
         div[data-testid="stExpander"] {
-          border-radius: 10px;
+          border-radius: 8px;
         }
 
         /* Avoid extremely wide embedded images. */
@@ -3799,7 +3838,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.3 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.3.3 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -3830,7 +3869,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.3 treats ``Original Resume`` as the canonical full-resume field.
+    V2.3.3 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -4150,7 +4189,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.3 PDF RESUME EXPORT
+# 8D. V2.3.3 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -4958,7 +4997,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.3 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
+    st.caption("V2.3.3 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -5011,7 +5050,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.3：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.3.3：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -5119,7 +5158,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.3 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.3.3 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -6154,7 +6193,7 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.3 · 电脑/手机自适应、AI统一订单格式、老师匹配、老师自动入库、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.3.3 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
