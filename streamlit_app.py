@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.2
+# AI Teacher Matching System V2.2.1
 # Single-file Streamlit app
 #
 # Goals
@@ -30,22 +30,45 @@ import requests
 import streamlit as st
 from google import genai
 from google.genai import types
-from PIL import Image as PILImage, ImageOps
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.platypus import (
-    Image as RLImage,
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+PDF_EXPORT_AVAILABLE = True
+PDF_EXPORT_IMPORT_ERROR = ""
+
+try:
+    from PIL import Image as PILImage, ImageOps
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import (
+        Image as RLImage,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+except Exception as _pdf_import_error:
+    PDF_EXPORT_AVAILABLE = False
+    PDF_EXPORT_IMPORT_ERROR = str(_pdf_import_error)
+    PILImage = None
+    ImageOps = None
+    colors = None
+    TA_CENTER = None
+    TA_LEFT = None
+    A4 = None
+    ParagraphStyle = None
+    mm = None
+    pdfmetrics = None
+    UnicodeCIDFont = None
+    RLImage = None
+    Paragraph = None
+    SimpleDocTemplate = None
+    Spacer = None
+    Table = None
+    TableStyle = None
 
 
 # ============================================================
@@ -53,7 +76,7 @@ from reportlab.platypus import (
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.2",
+    page_title="AI Teacher Matching System V2.2.1",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -3421,7 +3444,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.2 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.2.1 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -3452,7 +3475,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.2 treats ``Original Resume`` as the canonical full-resume field.
+    V2.2.1 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -3728,12 +3751,16 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.2 PDF RESUME EXPORT
+# 8D. V2.2.1 PDF RESUME EXPORT
 # ============================================================
 
 
 def register_pdf_cjk_font() -> str:
     """Use ReportLab's built-in CJK CID font; no external font file is required."""
+    if not PDF_EXPORT_AVAILABLE:
+        raise RuntimeError(
+            "PDF组件尚未安装。请确认 requirements.txt 包含 reportlab 和 Pillow。"
+        )
     font_name = "STSong-Light"
     try:
         pdfmetrics.getFont(font_name)
@@ -3752,6 +3779,8 @@ def clean_markdown_inline(text: str) -> str:
 
 
 def prepared_photo_bytes(photo_bytes: bytes) -> Optional[BytesIO]:
+    if not PDF_EXPORT_AVAILABLE:
+        return None
     if not photo_bytes:
         return None
     try:
@@ -3875,6 +3904,11 @@ def build_resume_pdf_bytes(
     mode: str = "full",
 ) -> bytes:
     """Create an A4 Chinese PDF using the targeted resume and optional teacher photo."""
+    if not PDF_EXPORT_AVAILABLE:
+        raise RuntimeError(
+            "PDF导出组件未安装。请在 requirements.txt 中加入 reportlab 和 Pillow，"
+            "Commit 后重新 Reboot Streamlit。"
+        )
     font_name = register_pdf_cjk_font()
     output = BytesIO()
 
@@ -4085,7 +4119,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.2 · 匹配 / 订单定制简历 / 事实校验")
+    st.caption("V2.2.1 · 匹配 / 订单定制简历 / 事实校验")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -4129,7 +4163,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.2：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.2.1：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -4237,7 +4271,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.2 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.2.1 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -4937,60 +4971,69 @@ elif mode == "④ 根据订单优化老师简历":
             )
 
         st.markdown("### 生成带照片 PDF")
-        include_photo = st.checkbox(
-            "PDF中包含老师照片",
-            value=bool(teacher_photo_url(resume_teacher)),
-            disabled=not bool(teacher_photo_url(resume_teacher)),
-            key=f"resume_pdf_include_photo_v22_{teacher_identity}",
-        )
 
-        pdf_photo_bytes: Optional[bytes] = None
-        if include_photo:
+        if not PDF_EXPORT_AVAILABLE:
+            st.warning(
+                "PDF功能当前未启用，因为 Streamlit 环境没有安装 PDF 依赖。"
+                "请确认仓库根目录 requirements.txt 包含：reportlab、Pillow。"
+            )
+            if PDF_EXPORT_IMPORT_ERROR:
+                st.caption(f"PDF依赖加载信息：{PDF_EXPORT_IMPORT_ERROR}")
+        else:
+            include_photo = st.checkbox(
+                "PDF中包含老师照片",
+                value=bool(teacher_photo_url(resume_teacher)),
+                disabled=not bool(teacher_photo_url(resume_teacher)),
+                key=f"resume_pdf_include_photo_v221_{teacher_identity}",
+            )
+
+            pdf_photo_bytes: Optional[bytes] = None
+            if include_photo:
+                try:
+                    active_photo_url = teacher_photo_url(resume_teacher)
+                    if active_photo_url:
+                        pdf_photo_bytes = download_binary_url(active_photo_url)
+                except Exception as exc:
+                    st.warning(f"老师照片暂时无法下载，将生成无照片PDF：{exc}")
+                    pdf_photo_bytes = None
+
             try:
-                active_photo_url = teacher_photo_url(resume_teacher)
-                if active_photo_url:
-                    pdf_photo_bytes = download_binary_url(active_photo_url)
+                full_pdf = build_resume_pdf_bytes(
+                    teacher_name_text=result_teacher,
+                    resume_result=resume_result,
+                    tailored_text=tailored_text,
+                    recommendation_text=recommendation_text,
+                    photo_bytes=pdf_photo_bytes,
+                    mode="full",
+                )
+                brief_pdf = build_resume_pdf_bytes(
+                    teacher_name_text=result_teacher,
+                    resume_result=resume_result,
+                    tailored_text=tailored_text,
+                    recommendation_text=recommendation_text,
+                    photo_bytes=pdf_photo_bytes,
+                    mode="brief",
+                )
+
+                p1, p2 = st.columns(2)
+                with p1:
+                    st.download_button(
+                        "下载岗位定制简历 PDF",
+                        data=full_pdf,
+                        file_name=f"{result_teacher}_岗位定制简历.pdf".replace("/", "-"),
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                with p2:
+                    st.download_button(
+                        "下载候选人推荐简版 PDF",
+                        data=brief_pdf,
+                        file_name=f"{result_teacher}_候选人推荐简版.pdf".replace("/", "-"),
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
             except Exception as exc:
-                st.warning(f"老师照片暂时无法下载，将生成无照片PDF：{exc}")
-                pdf_photo_bytes = None
-
-        try:
-            full_pdf = build_resume_pdf_bytes(
-                teacher_name_text=result_teacher,
-                resume_result=resume_result,
-                tailored_text=tailored_text,
-                recommendation_text=recommendation_text,
-                photo_bytes=pdf_photo_bytes,
-                mode="full",
-            )
-            brief_pdf = build_resume_pdf_bytes(
-                teacher_name_text=result_teacher,
-                resume_result=resume_result,
-                tailored_text=tailored_text,
-                recommendation_text=recommendation_text,
-                photo_bytes=pdf_photo_bytes,
-                mode="brief",
-            )
-
-            p1, p2 = st.columns(2)
-            with p1:
-                st.download_button(
-                    "下载岗位定制简历 PDF",
-                    data=full_pdf,
-                    file_name=f"{result_teacher}_岗位定制简历.pdf".replace("/", "-"),
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
-            with p2:
-                st.download_button(
-                    "下载候选人推荐简版 PDF",
-                    data=brief_pdf,
-                    file_name=f"{result_teacher}_候选人推荐简版.pdf".replace("/", "-"),
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
-        except Exception as exc:
-            st.warning(f"PDF生成暂时失败：{exc}")
+                st.warning(f"PDF生成暂时失败：{exc}")
 
 
 # ============================================================
@@ -5222,7 +5265,7 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.2 · AI统一订单格式、老师匹配、老师自动入库、照片管理、岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.2.1 · AI统一订单格式、老师匹配、老师自动入库、照片管理、岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
