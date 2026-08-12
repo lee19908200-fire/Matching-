@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.0
+# AI Teacher Matching System V2.1
 # Single-file Streamlit app
 #
 # Goals
@@ -36,7 +36,7 @@ from google.genai import types
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.0",
+    page_title="AI Teacher Matching System V2.1",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -2971,7 +2971,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.0 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.1 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -2997,24 +2997,68 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def teacher_resume_source_hint(teacher: Dict[str, Any]) -> str:
-    """Prefill the resume editor only when Baserow already contains resume-like text."""
+def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """Return the best available original resume text and its Baserow source field.
+
+    V2.1 treats ``Original Resume`` as the canonical full-resume field.
+    Older/fallback field names are still supported so existing databases continue
+    to work.  The function never fabricates missing resume text.
+    """
     preferred_fields = [
-        "Full Resume", "Resume", "CV", "Resume Text", "Original Resume",
-        "Experience Summary", "Profile", "Biography", "Bio", "Notes",
+        "Original Resume",
+        "Full Resume",
+        "Resume",
+        "CV",
+        "Resume Text",
     ]
-    sections: List[str] = []
+
     for field in preferred_fields:
         value = teacher.get(field)
         if value is None or value == "" or value == []:
             continue
+
         if isinstance(value, list):
             body = "\n".join(str(x) for x in value if x not in (None, ""))
         else:
             body = str(value).strip()
+
+        if body:
+            return body, field
+
+    # Conservative fallback: these fields are not guaranteed to be a complete CV,
+    # so concatenate them only when no dedicated resume field exists.
+    fallback_fields = [
+        "Experience Summary",
+        "Profile",
+        "Biography",
+        "Bio",
+        "Notes",
+    ]
+    sections: List[str] = []
+
+    for field in fallback_fields:
+        value = teacher.get(field)
+        if value is None or value == "" or value == []:
+            continue
+
+        if isinstance(value, list):
+            body = "\n".join(str(x) for x in value if x not in (None, ""))
+        else:
+            body = str(value).strip()
+
         if body:
             sections.append(f"【{field}】\n{body}")
-    return "\n\n".join(sections).strip()
+
+    if sections:
+        return "\n\n".join(sections).strip(), "结构化简介/备注字段"
+
+    return "", None
+
+
+def teacher_resume_source_hint(teacher: Dict[str, Any]) -> str:
+    """Backward-compatible wrapper used by older code paths."""
+    resume_text, _source_field = teacher_resume_source(teacher)
+    return resume_text
 
 
 def safe_order_payload_for_resume(parsed: Dict[str, Any]) -> Dict[str, Any]:
@@ -3263,7 +3307,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.0 · 匹配 / 订单定制简历 / 事实校验")
+    st.caption("V2.1 · 匹配 / 订单定制简历 / 事实校验")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -3305,7 +3349,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.0：标准订单 → 老师匹配 → 针对目标订单生成真实、可核验的定制简历。</div>',
+    '<div class="main-subtitle">V2.1：标准订单 → 老师匹配 → 自动读取 Baserow 原始简历 → 针对目标订单生成真实、可核验的定制简历。</div>',
     unsafe_allow_html=True,
 )
 
@@ -3412,7 +3456,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.0 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.1 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -3769,7 +3813,8 @@ elif mode == "③ 选择老师 → 匹配全部订单":
 else:
     st.markdown('<div class="section-title">根据目标订单优化老师简历</div>', unsafe_allow_html=True)
     st.caption(
-        "选择老师和目标订单后，Gemini 只会重新组织、突出和改写已有真实经历。"
+        "选择老师和目标订单后，系统会优先从 Baserow 的 Original Resume 自动读取老师完整简历，"
+        "再由 Gemini 重新组织、突出和改写已有真实经历。"
         "任何简历/数据库中没有证据的能力都会进入『待确认』，不会为了迎合岗位而虚构。"
     )
 
@@ -3863,26 +3908,64 @@ else:
             if manual:
                 st.caption("年龄、性别、籍贯、外貌等人工复核信息不会用于简历优化。")
 
-    st.markdown("### ③ 提供老师原始简历")
-    teacher_identity = str(resume_teacher.get("Baserow ID") or teacher_name(resume_teacher)).replace(" ", "_")
-    resume_editor_key = f"resume_source_text_v20_{teacher_identity}"
+    st.markdown("### ③ 老师原始简历（自动从 Baserow 读取）")
+    teacher_identity = str(
+        resume_teacher.get("Baserow ID") or teacher_name(resume_teacher)
+    ).replace(" ", "_")
+
+    baserow_resume_text, baserow_resume_field = teacher_resume_source(resume_teacher)
+    resume_editor_key = f"resume_source_text_v21_{teacher_identity}"
+
     if resume_editor_key not in st.session_state:
-        st.session_state[resume_editor_key] = teacher_resume_source_hint(resume_teacher)
+        st.session_state[resume_editor_key] = baserow_resume_text
+
+    if baserow_resume_field:
+        if baserow_resume_field == "Original Resume":
+            st.success(
+                f"✅ 已从 Baserow 的 **Original Resume** 自动读取 "
+                f"{len(baserow_resume_text):,} 个字符。"
+            )
+        else:
+            st.info(
+                f"ℹ️ Baserow 暂无 `Original Resume`，当前从 **{baserow_resume_field}** "
+                f"读取了 {len(baserow_resume_text):,} 个字符。"
+            )
+
+        reload_resume = st.button(
+            "从 Baserow 重新加载老师原始简历",
+            use_container_width=True,
+            key=f"reload_resume_from_baserow_v21_{teacher_identity}",
+        )
+        if reload_resume:
+            st.session_state[resume_editor_key] = baserow_resume_text
+            st.rerun()
+    else:
+        st.warning(
+            "⚠️ 这位老师在 Baserow 中还没有完整原始简历。"
+            "建议在 Teachers 表新增 `Original Resume`（Long text）字段，"
+            "把老师完整简历粘贴进去。"
+        )
 
     original_resume_text = st.text_area(
-        "老师原始简历（建议粘贴完整简历）",
+        "老师原始简历（已自动载入，可在本次生成前人工补充）",
         height=520,
         key=resume_editor_key,
         placeholder=(
-            "如果 Baserow 里没有完整简历，请把老师原始简历粘贴到这里。\n"
-            "系统会同时参考 Baserow 结构化老师资料，但不会编造简历中不存在的经历。"
+            "如果 Baserow 中暂时没有 Original Resume，可以先在这里粘贴完整简历。\n"
+            "建议正式使用时把完整原始简历统一保存到 Baserow 的 Original Resume 字段。\n"
+            "这里的临时修改只影响本次生成，不会覆盖 Baserow 原始数据。"
         ),
     )
 
-    if not original_resume_text.strip():
+    if original_resume_text.strip():
+        st.caption(
+            f"本次将向简历优化模型提供约 {len(original_resume_text):,} 个字符的老师原始简历。"
+            "Baserow 结构化字段仍会同时用于事实校验。"
+        )
+    else:
         st.warning(
-            "目前没有完整原始简历文本。仍然可以仅根据 Baserow 已有结构化资料生成保守版，"
-            "但工作经历细节会比较少。为了生成完整定制简历，建议粘贴原始简历。"
+            "目前没有完整原始简历文本。系统仍可仅根据 Baserow 结构化资料生成保守版，"
+            "但工作经历细节会比较少。"
         )
 
     supplemental_default = ""
@@ -4043,6 +4126,6 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.0 · AI统一订单格式、老师匹配、标准订单池、岗位定制简历与事实校验。"
+    "Teacher Matching System V2.1 · AI统一订单格式、老师匹配、标准订单池、岗位定制简历与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
