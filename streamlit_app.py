@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.2.4
+# AI Teacher Matching System V2.2.5
 # Single-file Streamlit app
 #
 # Goals
@@ -78,7 +78,7 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.2.4",
+    page_title="AI Teacher Matching System V2.2.5",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -3535,7 +3535,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.2.4 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.2.5 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -3566,7 +3566,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.2.4 treats ``Original Resume`` as the canonical full-resume field.
+    V2.2.5 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -3711,23 +3711,38 @@ NON-NEGOTIABLE FACTUALITY RULES:
 
 TAILORING GOAL:
 - Lead with the teacher's strongest TRUE evidence for this job.
-- Compress less relevant content without deleting important chronology.
 - Use concise professional Chinese suitable for sending to a recruiter or private-family employer.
-- Keep the tailored_resume_markdown looking like a real professional CV, not an analysis report.
+- Generate TWO clearly different resume versions in this SAME response:
+  A) FULL VERSION: complete job-targeted resume, normally 2-4 pages after PDF layout.
+  B) BRIEF VERSION: genuinely condensed one-page style resume. It must NOT simply repeat or truncate the full version.
+- The FULL version should preserve the teacher's relevant chronology and fuller work-history detail.
+- The BRIEF version should contain only the most useful content for this target job:
+  * brief summary around 70-120 Chinese characters;
+  * no more than 4 core strengths;
+  * 2-4 most relevant work roles, normally no more than 2 concise duty/achievement lines per role;
+  * older or weakly relevant roles may be combined into one short “其他经历” line;
+  * education should be concise;
+  * certificates/qualifications may remain vertically listed when confirmed, but do not repeat them elsewhere.
+- The BRIEF version should normally be materially shorter than the FULL version (aim for roughly 40%-60% of the full resume body).
 - ALL visible resume section headings must be Chinese. Do not use PROFILE, CORE STRENGTHS, EXPERIENCE, EDUCATION, SKILLS, CONTACT, CERTIFICATES or other English section headings.
 - Prefer Chinese headings such as：个人简介、核心优势、工作经历、教育背景、证书与资质、专业技能、语言能力、其他信息。
-- In 证书与资质, list every confirmed certificate / qualification on its own separate bullet line. Do not join several certificates in one horizontal sentence.
+- professional_summary / core_strengths are rendered separately by the PDF template. Therefore tailored_resume_markdown and brief_resume_markdown should normally START from 工作经历 and should NOT repeat 个人简介、个人总结 or 核心优势.
+- In 证书与资质, list every confirmed certificate / qualification on its own separate line. Do not join several certificates in one horizontal sentence.
 - Use a vertical single-column reading order. Do not design side-by-side columns or mix a left sidebar with a right content column.
-- Do not put match scores, requirement tables, reasoning, evidence labels, conflicts, or pending-confirmation items into tailored_resume_markdown.
+- Do not put match scores, requirement tables, reasoning, evidence labels, conflicts, or pending-confirmation items into either resume body.
 - Evidence and confirmation items belong only in requirement_evidence / questions_to_confirm for the web interface, not in the resume body.
 - Keep unsupported requirements out of the resume and surface them for human confirmation.
+- Do not use markdown emphasis symbols such as **, __, *word*, _word_, or backticks inside visible resume sentences. Headings may use ## only as structural markers because the PDF renderer removes them.
 
 RETURN EXACTLY THIS JSON STRUCTURE:
 {{
   "resume_title": "short targeted professional headline",
-  "professional_summary": "120-220 Chinese characters, factual and job-targeted",
-  "core_strengths": ["fact-based strength 1", "fact-based strength 2"],
-  "tailored_resume_markdown": "clean Chinese resume body only. Use Chinese headings only, such as ## 工作经历, ## 教育背景, ## 证书与资质, ## 专业技能. Under 证书与资质, put each certificate/qualification on its own bullet line. Use a vertical single-column reading order. Do NOT include English section headings, matching score, job-fit analysis, requirement evidence, recommendation reasoning, conflicts, questions, or confirmation notes inside this field.",
+  "professional_summary": "120-220 Chinese characters, factual and job-targeted for the FULL version",
+  "core_strengths": ["full-version fact-based strength 1", "full-version fact-based strength 2"],
+  "tailored_resume_markdown": "FULL resume body. Chinese headings only. Normally start with ## 工作经历; include fuller relevant chronology, education, qualifications and skills as appropriate. Do not repeat 个人简介/个人总结/核心优势 because those are rendered separately. No markdown emphasis symbols.",
+  "brief_professional_summary": "70-120 Chinese characters, factual and job-targeted for the BRIEF version",
+  "brief_core_strengths": ["maximum 4 concise job-relevant strengths"],
+  "brief_resume_markdown": "GENUINELY CONDENSED brief resume body, materially shorter than tailored_resume_markdown. Chinese headings only. Keep only 2-4 most relevant roles, normally max 2 concise lines per role; combine less-relevant history into a short 其他经历 when useful. Do not repeat 个人简介/个人总结/核心优势. No markdown emphasis symbols.",
   "employer_recommendation": "150-300 Chinese characters for recruiter/employer recommendation",
   "requirement_evidence": [
     {{
@@ -3781,6 +3796,7 @@ def generate_tailored_resume(
 
     required_keys = {
         "resume_title", "professional_summary", "tailored_resume_markdown",
+        "brief_professional_summary", "brief_resume_markdown",
         "employer_recommendation", "requirement_evidence", "questions_to_confirm",
     }
     if not required_keys.intersection(payload.keys()):
@@ -3790,6 +3806,9 @@ def generate_tailored_resume(
     payload.setdefault("professional_summary", "")
     payload.setdefault("core_strengths", [])
     payload.setdefault("tailored_resume_markdown", "")
+    payload.setdefault("brief_professional_summary", "")
+    payload.setdefault("brief_core_strengths", [])
+    payload.setdefault("brief_resume_markdown", "")
     payload.setdefault("employer_recommendation", "")
     payload.setdefault("requirement_evidence", [])
     payload.setdefault("questions_to_confirm", [])
@@ -3802,10 +3821,29 @@ def generate_tailored_resume(
         payload["questions_to_confirm"] = [str(payload.get("questions_to_confirm"))]
     if not isinstance(payload.get("core_strengths"), list):
         payload["core_strengths"] = [str(payload.get("core_strengths"))]
+    if not isinstance(payload.get("brief_core_strengths"), list):
+        payload["brief_core_strengths"] = [str(payload.get("brief_core_strengths"))]
+    payload["brief_core_strengths"] = [
+        str(x).strip()
+        for x in payload.get("brief_core_strengths", [])
+        if str(x).strip()
+    ][:4]
     if not isinstance(payload.get("content_deemphasized"), list):
         payload["content_deemphasized"] = [str(payload.get("content_deemphasized"))]
     if not isinstance(payload.get("factuality_notes"), list):
         payload["factuality_notes"] = [str(payload.get("factuality_notes"))]
+
+    if not str(payload.get("brief_professional_summary") or "").strip():
+        payload["brief_professional_summary"] = str(
+            payload.get("professional_summary") or ""
+        ).strip()[:180]
+
+    if not str(payload.get("brief_resume_markdown") or "").strip():
+        # This fallback is only for resilience. New prompts should return a true
+        # brief version directly; do not call Gemini a second time just for the PDF.
+        payload["brief_resume_markdown"] = str(
+            payload.get("tailored_resume_markdown") or ""
+        ).strip()
 
     return payload, model_used
 
@@ -3848,7 +3886,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.2.4 PDF RESUME EXPORT
+# 8D. V2.2.5 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -3867,12 +3905,26 @@ def register_pdf_cjk_font() -> str:
 
 
 def clean_markdown_inline(text: str) -> str:
+    """Return plain resume text with markdown/control symbols removed.
+
+    This deliberately removes both well-formed and stray markdown markers, e.g.
+    **重点**, _重点_, trailing **, backticks, and accidental heading markers.
+    """
     value = str(text or "")
+    value = value.replace("\\", "")
+    value = re.sub(r"`([^`]*)`", r"\1", value)
     value = re.sub(r"\*\*(.*?)\*\*", r"\1", value)
     value = re.sub(r"__(.*?)__", r"\1", value)
-    value = re.sub(r"`([^`]+)`", r"\1", value)
+    value = re.sub(r"(?<!\w)[*_]{1,3}", "", value)
+    value = re.sub(r"[*_]{1,3}(?!\w)", "", value)
+    value = value.replace("**", "").replace("__", "")
+    value = value.replace("*", "").replace("_", "").replace("`", "")
+    value = re.sub(r"^#+\s*", "", value)
+    value = re.sub(r"\s+([：:，。,；;])", r"\1", value)
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    value = value.strip()
     value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return value.strip()
+    return value
 
 
 def prepared_photo_bytes(photo_bytes: bytes) -> Optional[BytesIO]:
@@ -3940,6 +3992,9 @@ def markdownish_resume_flowables(
         "岗位要求", "匹配", "推荐理由", "候选人推荐", "事实校验",
         "证据对照", "待确认", "人工确认", "匹配原则", "匹配思路",
         "为什么推荐", "资料缺口", "风险提示",
+        # These are already rendered from dedicated JSON fields above the body.
+        "个人简介", "个人总结", "核心优势",
+        "PROFILE", "PROFESSIONAL SUMMARY", "CORE STRENGTHS",
     }
 
     for raw_line in str(text or "").splitlines():
@@ -3986,7 +4041,8 @@ def markdownish_resume_flowables(
         if line.startswith(("•", "-", "*", "·")):
             content = line.lstrip("•-*· ").strip()
             if content:
-                flowables.append(Paragraph("- " + clean_markdown_inline(content), bullet_style))
+                # Keep the visual list indentation, but do not print markdown markers.
+                flowables.append(Paragraph(clean_markdown_inline(content), bullet_style))
             continue
 
         flowables.append(Paragraph(clean_markdown_inline(line), body_style))
@@ -4499,7 +4555,14 @@ def build_resume_pdf_bytes(
         story.append(Spacer(1, 3.5 * mm))
 
     headline = str(resume_result.get("resume_title") or "").strip()
-    summary = str(resume_result.get("professional_summary") or "").strip()
+    if mode == "brief":
+        summary = str(
+            resume_result.get("brief_professional_summary")
+            or resume_result.get("professional_summary")
+            or ""
+        ).strip()
+    else:
+        summary = str(resume_result.get("professional_summary") or "").strip()
 
     story.append(Paragraph(clean_markdown_inline(teacher_name_text), name_style))
     if headline:
@@ -4542,15 +4605,20 @@ def build_resume_pdf_bytes(
         story.append(Paragraph("个人简介", heading_style))
         story.append(Paragraph(clean_markdown_inline(summary), summary_style))
 
+    strength_source = (
+        resume_result.get("brief_core_strengths", [])
+        if mode == "brief"
+        else resume_result.get("core_strengths", [])
+    )
     strengths = [
         str(x).strip()
-        for x in resume_result.get("core_strengths", [])
+        for x in strength_source
         if str(x).strip()
     ]
     if strengths:
         story.append(Paragraph("核心优势", heading_style))
-        for item in strengths[:6 if mode == "brief" else 8]:
-            story.append(Paragraph("- " + clean_markdown_inline(item), bullet_style))
+        for item in strengths[:4 if mode == "brief" else 8]:
+            story.append(Paragraph(clean_markdown_inline(item), bullet_style))
 
     # -------------------------
     # Certificates: one per line.
@@ -4560,7 +4628,7 @@ def build_resume_pdf_bytes(
         story.append(Paragraph("证书与资质", heading_style))
         for certificate in certificates:
             story.append(
-                Paragraph("- " + clean_markdown_inline(certificate), bullet_style)
+                Paragraph(clean_markdown_inline(certificate), bullet_style)
             )
 
     # -------------------------
@@ -4569,8 +4637,8 @@ def build_resume_pdf_bytes(
     skills = structured.get("专业技能", [])
     if skills:
         story.append(Paragraph("专业技能", heading_style))
-        for skill in skills[:10]:
-            story.append(Paragraph("- " + clean_markdown_inline(skill), bullet_style))
+        for skill in skills[:6 if mode == "brief" else 10]:
+            story.append(Paragraph(clean_markdown_inline(skill), bullet_style))
 
     # -------------------------
     # Gemini resume body.
@@ -4585,10 +4653,6 @@ def build_resume_pdf_bytes(
         subheading_style,
         bullet_style,
     )
-
-    if mode == "brief":
-        # Brief version stays vertical and concise.
-        resume_flowables = resume_flowables[:95]
 
     story.extend(resume_flowables)
 
@@ -4630,7 +4694,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.2.4 · 匹配 / 订单定制简历 / 事实校验")
+    st.caption("V2.2.5 · 匹配 / 订单定制简历 / 事实校验")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -4674,7 +4738,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.2.4：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.2.5：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -4782,7 +4846,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.2.4 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.2.5 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -5371,6 +5435,7 @@ elif mode == "④ 根据订单优化老师简历":
             "resume_optimizer_result_teacher_v20",
             "resume_optimizer_result_order_v20",
             "resume_tailored_editor_v20",
+            "resume_brief_editor_v225",
             "resume_recommendation_editor_v20",
         ]:
             st.session_state.pop(key, None)
@@ -5394,6 +5459,9 @@ elif mode == "④ 根据订单优化老师简历":
                     st.session_state["resume_optimizer_result_order_v20"] = order_title(parsed_target, 1)
                     st.session_state["resume_tailored_editor_v20"] = str(
                         resume_result.get("tailored_resume_markdown") or ""
+                    )
+                    st.session_state["resume_brief_editor_v225"] = str(
+                        resume_result.get("brief_resume_markdown") or ""
                     )
                     st.session_state["resume_recommendation_editor_v20"] = str(
                         resume_result.get("employer_recommendation") or ""
@@ -5446,6 +5514,17 @@ elif mode == "④ 根据订单优化老师简历":
             key="resume_tailored_editor_v20",
         )
 
+        st.markdown("### 精简版简历（可继续人工修改）")
+        st.caption(
+            "精简版不是把完整版简单截断，而是同一次 Gemini 请求单独生成："
+            "保留最相关的2-4段经历、最多4项核心优势，并明显压缩次要经历。"
+        )
+        brief_tailored_text = st.text_area(
+            "精简版简历",
+            height=480,
+            key="resume_brief_editor_v225",
+        )
+
         st.markdown("### 给派单老师 / 雇主的候选人推荐语")
         recommendation_text = st.text_area(
             "推荐简介",
@@ -5482,7 +5561,12 @@ elif mode == "④ 根据订单优化老师简历":
             )
 
         st.markdown("### 生成专业简历 PDF")
-        st.caption("PDF采用中文单栏竖版：照片、姓名、基本信息、个人简介、核心优势、证书与资质、专业技能、工作经历、教育背景依次向下排列；不会显示匹配度、匹配原则、证据表、冲突或待确认分析。")
+        st.caption(
+            "PDF采用中文单栏竖版。完整版保留更完整的相关工作经历；"
+            "精简版使用独立生成的精简正文，不再与完整版重复。"
+            "PDF会清理 **、__、多余星号、下划线、反引号等Markdown符号；"
+            "不会显示匹配度、匹配原则、证据表、冲突或待确认分析。"
+        )
 
         if not PDF_EXPORT_AVAILABLE:
             st.warning(
@@ -5522,7 +5606,7 @@ elif mode == "④ 根据订单优化老师简历":
                 brief_pdf = build_resume_pdf_bytes(
                     teacher_name_text=result_teacher,
                     resume_result=resume_result,
-                    tailored_text=tailored_text,
+                    tailored_text=brief_tailored_text,
                     recommendation_text=recommendation_text,
                     photo_bytes=pdf_photo_bytes,
                     mode="brief",
@@ -5779,7 +5863,7 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.2.4 · AI统一订单格式、老师匹配、老师自动入库、照片管理、岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.2.5 · AI统一订单格式、老师匹配、老师自动入库、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
