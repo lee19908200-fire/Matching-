@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.2.3
+# AI Teacher Matching System V2.2.4
 # Single-file Streamlit app
 #
 # Goals
@@ -78,7 +78,7 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.2.3",
+    page_title="AI Teacher Matching System V2.2.4",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -3535,7 +3535,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.2.3 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.2.4 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -3566,7 +3566,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.2.3 treats ``Original Resume`` as the canonical full-resume field.
+    V2.2.4 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -3714,6 +3714,10 @@ TAILORING GOAL:
 - Compress less relevant content without deleting important chronology.
 - Use concise professional Chinese suitable for sending to a recruiter or private-family employer.
 - Keep the tailored_resume_markdown looking like a real professional CV, not an analysis report.
+- ALL visible resume section headings must be Chinese. Do not use PROFILE, CORE STRENGTHS, EXPERIENCE, EDUCATION, SKILLS, CONTACT, CERTIFICATES or other English section headings.
+- Prefer Chinese headings such as：个人简介、核心优势、工作经历、教育背景、证书与资质、专业技能、语言能力、其他信息。
+- In 证书与资质, list every confirmed certificate / qualification on its own separate bullet line. Do not join several certificates in one horizontal sentence.
+- Use a vertical single-column reading order. Do not design side-by-side columns or mix a left sidebar with a right content column.
 - Do not put match scores, requirement tables, reasoning, evidence labels, conflicts, or pending-confirmation items into tailored_resume_markdown.
 - Evidence and confirmation items belong only in requirement_evidence / questions_to_confirm for the web interface, not in the resume body.
 - Keep unsupported requirements out of the resume and surface them for human confirmation.
@@ -3723,7 +3727,7 @@ RETURN EXACTLY THIS JSON STRUCTURE:
   "resume_title": "short targeted professional headline",
   "professional_summary": "120-220 Chinese characters, factual and job-targeted",
   "core_strengths": ["fact-based strength 1", "fact-based strength 2"],
-  "tailored_resume_markdown": "clean Chinese resume body only. Prefer headings such as ## 工作经历, ## 教育背景, ## 证书与资质, ## 专业技能. Do NOT include matching score, job-fit analysis, requirement evidence, recommendation reasoning, conflicts, questions, or confirmation notes inside this field.",
+  "tailored_resume_markdown": "clean Chinese resume body only. Use Chinese headings only, such as ## 工作经历, ## 教育背景, ## 证书与资质, ## 专业技能. Under 证书与资质, put each certificate/qualification on its own bullet line. Use a vertical single-column reading order. Do NOT include English section headings, matching score, job-fit analysis, requirement evidence, recommendation reasoning, conflicts, questions, or confirmation notes inside this field.",
   "employer_recommendation": "150-300 Chinese characters for recruiter/employer recommendation",
   "requirement_evidence": [
     {{
@@ -3844,7 +3848,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.2.3 PDF RESUME EXPORT
+# 8D. V2.2.4 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -4215,6 +4219,168 @@ def draw_resume_sidebar(
     canvas.restoreState()
 
 
+def normalize_resume_heading_text(value: str) -> str:
+    """Force common English CV headings into Chinese for PDF export."""
+    raw = str(value or "")
+    replacements = {
+        "PROFILE": "个人简介",
+        "PROFESSIONAL SUMMARY": "个人简介",
+        "SUMMARY": "个人简介",
+        "CORE STRENGTHS": "核心优势",
+        "STRENGTHS": "核心优势",
+        "EXPERIENCE": "工作经历",
+        "WORK EXPERIENCE": "工作经历",
+        "EDUCATION": "教育背景",
+        "CERTIFICATES": "证书与资质",
+        "CERTIFICATIONS": "证书与资质",
+        "QUALIFICATIONS": "证书与资质",
+        "CERTIFICATES & QUALIFICATIONS": "证书与资质",
+        "SKILLS": "专业技能",
+        "CONTACT": "联系方式",
+        "LANGUAGES": "语言能力",
+        "AWARDS": "荣誉与奖项",
+        "REFERENCES": "推荐人",
+    }
+
+    lines = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        prefix = ""
+        body = stripped
+        if stripped.startswith("### "):
+            prefix, body = "### ", stripped[4:].strip()
+        elif stripped.startswith("## "):
+            prefix, body = "## ", stripped[3:].strip()
+        elif stripped.startswith("# "):
+            prefix, body = "# ", stripped[2:].strip()
+
+        key = body.upper().strip().rstrip(":：")
+        if key in replacements:
+            body = replacements[key]
+        lines.append(prefix + body if stripped else "")
+    return "\n".join(lines)
+
+
+def split_vertical_items(value: Any) -> List[str]:
+    """Split multi-value teacher fields into individual vertical display items."""
+    raw_items = ensure_list(value)
+    result: List[str] = []
+
+    for raw in raw_items:
+        if raw is None:
+            continue
+        if isinstance(raw, dict):
+            raw = raw.get("value") or raw.get("name") or raw.get("text") or ""
+        text_value = str(raw).strip()
+        if not text_value:
+            continue
+
+        # Separate common multi-value delimiters, but do not split normal prose.
+        parts = re.split(r"[,，;；|]+", text_value)
+        if len(parts) == 1:
+            parts = [text_value]
+
+        for part in parts:
+            clean = str(part).strip()
+            if clean and clean not in result:
+                result.append(clean)
+
+    return result
+
+
+def pdf_teacher_vertical_sections(
+    teacher: Dict[str, Any],
+) -> Dict[str, List[str]]:
+    """Prepare Chinese, vertically stacked teacher metadata for the PDF."""
+    basics: List[str] = []
+    city = pdf_teacher_first(teacher, "Current City")
+    country = pdf_teacher_first(teacher, "Current Country")
+    location = "，".join(x for x in [city, country] if x)
+    if location:
+        basics.append(f"所在地：{location}")
+
+    degree = pdf_teacher_first(teacher, "Highest Degree")
+    if degree:
+        basics.append(f"学历：{degree}")
+
+    university = pdf_teacher_first(teacher, "University", "School")
+    if university:
+        basics.append(f"毕业院校：{university}")
+
+    major = pdf_teacher_first(teacher, "Major")
+    if major:
+        basics.append(f"专业：{major}")
+
+    languages = split_vertical_items(teacher.get("Teaching Languages"))
+    if languages:
+        basics.append("语言：" + "、".join(languages))
+
+    driving = boolish(teacher.get("Driving"))
+    if driving is True:
+        basics.append("驾驶：会")
+
+    live_in = boolish(teacher.get("Live-in"))
+    if live_in is True:
+        basics.append("住家：可")
+
+    child_min = to_number(teacher.get("Minimum Child Age"))
+    child_max = to_number(teacher.get("Maximum Child Age"))
+    if child_min is not None and child_max is not None:
+        basics.append(f"可接受孩子年龄：{child_min:g}-{child_max:g}岁")
+    elif child_min is not None:
+        basics.append(f"可接受孩子年龄：{child_min:g}岁以上")
+    elif child_max is not None:
+        basics.append(f"可接受孩子年龄：{child_max:g}岁以下")
+
+    contact: List[str] = []
+    for label, fields in [
+        ("电话", ("Phone", "Mobile", "Phone Number")),
+        ("邮箱", ("Email",)),
+        ("微信", ("WeChat", "Wechat")),
+    ]:
+        value = pdf_teacher_first(teacher, *fields)
+        if value:
+            contact.append(f"{label}：{value}")
+
+    skills: List[str] = []
+    for field in ["Subjects", "Curriculum"]:
+        for item in split_vertical_items(teacher.get(field)):
+            if item not in skills:
+                skills.append(item)
+
+    boolean_skill_map = [
+        ("Early Years Experience", "早教"),
+        ("General Tutoring Experience", "全科辅导"),
+        ("Family-School Communication", "家校沟通"),
+        ("Child Psychology Experience", "儿童心理"),
+        ("Cooking", "烹饪"),
+        ("Nanny Educator Experience", "教育陪伴 / 教育管家"),
+    ]
+    for field, label in boolean_skill_map:
+        if boolish(teacher.get(field)) is True and label not in skills:
+            skills.append(label)
+
+    certificates: List[str] = []
+    certificate_fields = [
+        "Certificates",
+        "Certifications",
+        "Qualifications",
+        "Licenses",
+        "Teaching Certificates",
+    ]
+    for field in certificate_fields:
+        for item in split_vertical_items(teacher.get(field)):
+            if item not in certificates:
+                certificates.append(item)
+
+    return {
+        "基本信息": basics,
+        "联系方式": contact,
+        "专业技能": skills,
+        "证书与资质": certificates,
+    }
+
+
 def build_resume_pdf_bytes(
     teacher_name_text: str,
     resume_result: Dict[str, Any],
@@ -4224,11 +4390,15 @@ def build_resume_pdf_bytes(
     mode: str = "full",
     teacher_profile: Optional[Dict[str, Any]] = None,
 ) -> bytes:
-    """Create a clean A4 resume PDF inspired by a classic two-column CV template.
+    """Create a clean A4 Chinese resume PDF in ONE vertical column.
 
-    The exported PDF contains only resume content. Matching score, requirement
-    evidence, recruiter reasoning, conflicts, and confirmation questions are
-    intentionally excluded from the PDF.
+    Design principles:
+    - Chinese section headings only.
+    - One top-to-bottom reading order; no left sidebar / right content column.
+    - Teacher photo is centered at the top when available.
+    - Certificates / qualifications are displayed one item per line.
+    - Matching scores, reasoning, evidence tables, conflicts and pending items
+      never appear in the exported resume.
     """
     if not PDF_EXPORT_AVAILABLE:
         raise RuntimeError(
@@ -4240,125 +4410,190 @@ def build_resume_pdf_bytes(
     teacher_profile = teacher_profile or {}
     output = BytesIO()
 
-    sidebar_w = 59 * mm
     doc = SimpleDocTemplate(
         output,
         pagesize=A4,
-        rightMargin=15 * mm,
-        leftMargin=sidebar_w + 11 * mm,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
         topMargin=15 * mm,
-        bottomMargin=14 * mm,
+        bottomMargin=15 * mm,
         title=f"{teacher_name_text} 简历",
         author="AI Teacher Matching System",
     )
 
-    heading_style = ParagraphStyle(
-        "clean_cv_heading",
-        fontName="Helvetica-Bold",
-        fontSize=11.5,
-        leading=14,
-        textColor=colors.HexColor("#22252B"),
-        spaceBefore=5,
-        spaceAfter=3,
-        borderWidth=0,
-    )
-    chinese_heading_style = ParagraphStyle(
-        "clean_cv_chinese_heading",
+    name_style = ParagraphStyle(
+        "vertical_cv_name",
         fontName=font_name,
-        fontSize=12.2,
+        fontSize=20,
+        leading=25,
+        textColor=colors.HexColor("#24262C"),
+        alignment=TA_CENTER,
+        spaceAfter=2,
+    )
+    title_style = ParagraphStyle(
+        "vertical_cv_title",
+        fontName=font_name,
+        fontSize=10.5,
+        leading=15,
+        textColor=colors.HexColor("#5C616B"),
+        alignment=TA_CENTER,
+        spaceAfter=3,
+    )
+    heading_style = ParagraphStyle(
+        "vertical_cv_heading",
+        fontName=font_name,
+        fontSize=12.5,
         leading=16,
         textColor=colors.HexColor("#22252B"),
-        spaceBefore=5,
+        spaceBefore=6,
         spaceAfter=3,
     )
     subheading_style = ParagraphStyle(
-        "clean_cv_subheading",
+        "vertical_cv_subheading",
         fontName=font_name,
-        fontSize=9.8,
-        leading=13,
+        fontSize=10,
+        leading=14,
         textColor=colors.HexColor("#2C3037"),
         spaceBefore=3,
-        spaceAfter=1.5,
+        spaceAfter=2,
     )
     body_style = ParagraphStyle(
-        "clean_cv_body",
+        "vertical_cv_body",
         fontName=font_name,
-        fontSize=8.7 if mode == "brief" else 9.0,
-        leading=12.8 if mode == "brief" else 13.2,
+        fontSize=9.0 if mode == "full" else 8.8,
+        leading=13.3,
         textColor=colors.HexColor("#3B3E45"),
         alignment=TA_LEFT,
-        spaceAfter=1.8,
+        spaceAfter=2,
     )
     bullet_style = ParagraphStyle(
-        "clean_cv_bullet",
+        "vertical_cv_bullet",
         fontName=font_name,
-        fontSize=8.7 if mode == "brief" else 9.0,
-        leading=12.5 if mode == "brief" else 13.0,
-        leftIndent=3.6 * mm,
-        firstLineIndent=-2.5 * mm,
+        fontSize=9.0 if mode == "full" else 8.8,
+        leading=13.0,
+        leftIndent=4.3 * mm,
+        firstLineIndent=-2.8 * mm,
         textColor=colors.HexColor("#3B3E45"),
-        spaceAfter=1,
+        spaceAfter=1.2,
     )
     summary_style = ParagraphStyle(
-        "clean_cv_summary",
+        "vertical_cv_summary",
         fontName=font_name,
-        fontSize=9.2,
-        leading=13.6,
-        textColor=colors.HexColor("#4A4E56"),
+        fontSize=9.3,
+        leading=13.8,
+        textColor=colors.HexColor("#41454D"),
         alignment=TA_LEFT,
-        spaceAfter=3,
+        spaceAfter=2,
     )
 
     story: List[Any] = []
+
+    # -------------------------
+    # Top portrait - vertical.
+    # -------------------------
+    circle_photo = prepared_circle_photo_bytes(photo_bytes or b"")
+    if circle_photo:
+        portrait = RLImage(circle_photo, width=30 * mm, height=30 * mm)
+        portrait.hAlign = "CENTER"
+        story.append(portrait)
+        story.append(Spacer(1, 3.5 * mm))
+
     headline = str(resume_result.get("resume_title") or "").strip()
     summary = str(resume_result.get("professional_summary") or "").strip()
 
-    # Right column starts with a clean profile section, not a matching report.
-    if summary:
-        story.append(Paragraph("PROFILE", heading_style))
-        story.append(Paragraph(clean_markdown_inline(summary), summary_style))
-        story.append(Spacer(1, 2.5 * mm))
+    story.append(Paragraph(clean_markdown_inline(teacher_name_text), name_style))
+    if headline:
+        story.append(Paragraph(clean_markdown_inline(headline), title_style))
 
-    # Core strengths are legitimate resume content; render compactly.
+    # Divider.
+    divider = Table([[""]], colWidths=[174 * mm], rowHeights=[0.7 * mm])
+    divider.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#C7C9CD")),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.append(Spacer(1, 2 * mm))
+    story.append(divider)
+    story.append(Spacer(1, 3.5 * mm))
+
+    # -------------------------
+    # Structured Baserow data.
+    # -------------------------
+    structured = pdf_teacher_vertical_sections(teacher_profile)
+
+    basics = structured.get("基本信息", [])
+    if basics:
+        story.append(Paragraph("基本信息", heading_style))
+        for item in basics:
+            story.append(Paragraph(clean_markdown_inline(item), body_style))
+
+    contact = structured.get("联系方式", [])
+    if contact:
+        story.append(Paragraph("联系方式", heading_style))
+        for item in contact:
+            story.append(Paragraph(clean_markdown_inline(item), body_style))
+
+    # -------------------------
+    # Profile and strengths.
+    # -------------------------
+    if summary:
+        story.append(Paragraph("个人简介", heading_style))
+        story.append(Paragraph(clean_markdown_inline(summary), summary_style))
+
     strengths = [
         str(x).strip()
         for x in resume_result.get("core_strengths", [])
         if str(x).strip()
     ]
     if strengths:
-        story.append(Paragraph("CORE STRENGTHS", heading_style))
+        story.append(Paragraph("核心优势", heading_style))
         for item in strengths[:6 if mode == "brief" else 8]:
             story.append(Paragraph("- " + clean_markdown_inline(item), bullet_style))
-        story.append(Spacer(1, 2.5 * mm))
 
-    # The Gemini body is itself a resume. Matching evidence / reasoning is filtered.
+    # -------------------------
+    # Certificates: one per line.
+    # -------------------------
+    certificates = structured.get("证书与资质", [])
+    if certificates:
+        story.append(Paragraph("证书与资质", heading_style))
+        for certificate in certificates:
+            story.append(
+                Paragraph("- " + clean_markdown_inline(certificate), bullet_style)
+            )
+
+    # -------------------------
+    # Skills: vertical only.
+    # -------------------------
+    skills = structured.get("专业技能", [])
+    if skills:
+        story.append(Paragraph("专业技能", heading_style))
+        for skill in skills[:10]:
+            story.append(Paragraph("- " + clean_markdown_inline(skill), bullet_style))
+
+    # -------------------------
+    # Gemini resume body.
+    # Force English headings to Chinese if they slipped through.
+    # -------------------------
+    cleaned_tailored_text = normalize_resume_heading_text(tailored_text)
+
     resume_flowables = markdownish_resume_flowables(
-        tailored_text,
+        cleaned_tailored_text,
         body_style,
-        chinese_heading_style,
+        heading_style,
         subheading_style,
         bullet_style,
     )
+
     if mode == "brief":
-        # Keep the brief PDF focused without injecting any matching analysis.
-        resume_flowables = resume_flowables[:90]
+        # Brief version stays vertical and concise.
+        resume_flowables = resume_flowables[:95]
+
     story.extend(resume_flowables)
 
-    # Intentionally do NOT add employer_recommendation, evidence tables,
-    # questions_to_confirm, matching score, conflicts, or factuality notes.
-
-    def _draw_sidebar(canvas: Any, document: Any) -> None:
-        draw_resume_sidebar(
-            canvas=canvas,
-            doc=document,
-            teacher=teacher_profile,
-            teacher_name_text=teacher_name_text,
-            headline=headline,
-            photo_bytes=photo_bytes,
-            font_name=font_name,
-        )
-
-    doc.build(story, onFirstPage=_draw_sidebar, onLaterPages=_draw_sidebar)
+    # No recommendation analysis / evidence / pending questions in PDF.
+    doc.build(story)
     return output.getvalue()
 
 
@@ -4395,7 +4630,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.2.3 · 匹配 / 订单定制简历 / 事实校验")
+    st.caption("V2.2.4 · 匹配 / 订单定制简历 / 事实校验")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -4439,7 +4674,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.2.3：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.2.4：标准订单 → 老师匹配 → 新老师自动入库/照片 → 自动读取 Baserow 原始简历 → 生成带照片的岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -4547,7 +4782,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.2.3 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.2.4 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -5247,7 +5482,7 @@ elif mode == "④ 根据订单优化老师简历":
             )
 
         st.markdown("### 生成专业简历 PDF")
-        st.caption("PDF采用左侧照片/基本信息 + 右侧工作经历/教育背景的Clean CV排版；不会显示匹配度、匹配原则、证据表、冲突或待确认分析。")
+        st.caption("PDF采用中文单栏竖版：照片、姓名、基本信息、个人简介、核心优势、证书与资质、专业技能、工作经历、教育背景依次向下排列；不会显示匹配度、匹配原则、证据表、冲突或待确认分析。")
 
         if not PDF_EXPORT_AVAILABLE:
             st.warning(
@@ -5544,7 +5779,7 @@ else:
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.2.3 · AI统一订单格式、老师匹配、老师自动入库、照片管理、岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.2.4 · AI统一订单格式、老师匹配、老师自动入库、照片管理、岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
