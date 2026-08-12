@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.3.3
+# AI Teacher Matching System V2.4
 # Single-file Streamlit app
 #
 # Goals
@@ -78,7 +78,7 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.3.3",
+    page_title="AI Teacher Matching System V2.4",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -88,7 +88,7 @@ st.markdown(
     """
     <style>
       /* ---------------------------------------------------------
-         V2.3.3 responsive layout
+         V2.4 responsive layout
          Desktop remains wide; phones automatically become a
          single-column, touch-friendly interface.
          --------------------------------------------------------- */
@@ -345,6 +345,7 @@ def get_secret(name: str, default: Any = None) -> Any:
 
 BASEROW_TOKEN = get_secret("BASEROW_TOKEN")
 TABLE_ID_RAW = get_secret("TABLE_ID")
+ORDERS_TABLE_ID_RAW = get_secret("ORDERS_TABLE_ID")
 GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
 GEMINI_MODEL = str(get_secret("GEMINI_MODEL", "gemini-3.6-flash") or "gemini-3.6-flash").strip()
 
@@ -352,6 +353,15 @@ try:
     TABLE_ID = int(TABLE_ID_RAW) if TABLE_ID_RAW is not None else None
 except (TypeError, ValueError):
     TABLE_ID = None
+
+try:
+    ORDERS_TABLE_ID = (
+        int(ORDERS_TABLE_ID_RAW)
+        if ORDERS_TABLE_ID_RAW is not None
+        else None
+    )
+except (TypeError, ValueError):
+    ORDERS_TABLE_ID = None
 
 BASEROW_BASE_URL = "https://api.baserow.io"
 BASEROW_PAGE_SIZE = 200
@@ -1111,6 +1121,552 @@ def save_original_resume_for_teacher(
         row_id,
         {"Original Resume": str(original_resume or "").strip()},
     )
+
+
+
+# ============================================================
+# 4B. V2.4 BASEROW ORDERS DATABASE
+# ============================================================
+
+def baserow_orders_headers() -> Dict[str, str]:
+    return {
+        "Authorization": f"Token {BASEROW_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_orders_fields() -> List[Dict[str, Any]]:
+    if not BASEROW_TOKEN:
+        raise RuntimeError("BASEROW_TOKEN 未配置。")
+    if ORDERS_TABLE_ID is None:
+        return []
+
+    url = f"{BASEROW_BASE_URL}/api/database/fields/table/{ORDERS_TABLE_ID}/"
+    response = requests.get(
+        url,
+        headers={"Authorization": f"Token {BASEROW_TOKEN}"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Orders 字段读取失败 HTTP {response.status_code}: "
+            f"{response.text[:800]}"
+        )
+    payload = response.json()
+    return payload if isinstance(payload, list) else []
+
+
+def orders_field_map() -> Dict[str, Dict[str, Any]]:
+    return {
+        str(field.get("name")): field
+        for field in load_orders_fields()
+        if field.get("name")
+    }
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_orders_from_baserow() -> List[Dict[str, Any]]:
+    if ORDERS_TABLE_ID is None:
+        return []
+    if not BASEROW_TOKEN:
+        raise RuntimeError("BASEROW_TOKEN 未配置。")
+
+    url = f"{BASEROW_BASE_URL}/api/database/rows/table/{ORDERS_TABLE_ID}/"
+    rows: List[Dict[str, Any]] = []
+    page = 1
+
+    while True:
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Token {BASEROW_TOKEN}"},
+            params={
+                "user_field_names": "true",
+                "page": page,
+                "size": 200,
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Orders 读取失败 HTTP {response.status_code}: "
+                f"{response.text[:900]}"
+            )
+
+        payload = response.json()
+        batch = payload.get("results") or []
+        if not isinstance(batch, list):
+            break
+
+        for row in batch:
+            if isinstance(row, dict):
+                item = dict(row)
+                item["Baserow Order Row ID"] = item.get("id")
+                rows.append(item)
+
+        if not payload.get("next"):
+            break
+        page += 1
+        if page > 50:
+            break
+
+    return rows
+
+
+def orders_create_row(data: Dict[str, Any]) -> Dict[str, Any]:
+    if ORDERS_TABLE_ID is None:
+        raise RuntimeError("ORDERS_TABLE_ID 尚未配置。")
+    if not data:
+        raise ValueError("没有需要保存的订单数据。")
+
+    url = f"{BASEROW_BASE_URL}/api/database/rows/table/{ORDERS_TABLE_ID}/"
+    response = requests.post(
+        url,
+        headers=baserow_orders_headers(),
+        params={"user_field_names": "true"},
+        json=data,
+        timeout=REQUEST_TIMEOUT,
+    )
+    if response.status_code not in {200, 201}:
+        raise RuntimeError(
+            f"Orders 新增失败 HTTP {response.status_code}: "
+            f"{response.text[:1200]}"
+        )
+
+    load_orders_from_baserow.clear()
+    load_orders_fields.clear()
+    return response.json()
+
+
+def orders_update_row(row_id: Any, data: Dict[str, Any]) -> Dict[str, Any]:
+    if ORDERS_TABLE_ID is None:
+        raise RuntimeError("ORDERS_TABLE_ID 尚未配置。")
+    if not row_id:
+        raise ValueError("订单 Row ID 不存在。")
+
+    url = (
+        f"{BASEROW_BASE_URL}/api/database/rows/table/"
+        f"{ORDERS_TABLE_ID}/{row_id}/"
+    )
+    response = requests.patch(
+        url,
+        headers=baserow_orders_headers(),
+        params={"user_field_names": "true"},
+        json=data,
+        timeout=REQUEST_TIMEOUT,
+    )
+    if response.status_code not in {200, 201}:
+        raise RuntimeError(
+            f"Orders 更新失败 HTTP {response.status_code}: "
+            f"{response.text[:1000]}"
+        )
+
+    load_orders_from_baserow.clear()
+    return response.json()
+
+
+def orders_select_options(field_name: str) -> List[str]:
+    schema = orders_field_map().get(field_name) or {}
+    values: List[str] = []
+    for option in schema.get("select_options") or []:
+        value = (
+            option.get("value")
+            if isinstance(option, dict)
+            else option
+        )
+        if value not in (None, ""):
+            values.append(str(value))
+    return values
+
+
+def serialize_orders_value(
+    field_name: str,
+    value: Any,
+) -> Tuple[Any, Optional[str]]:
+    schema = orders_field_map().get(field_name)
+    if not schema:
+        return None, f"Orders 表没有字段 {field_name}，已跳过。"
+
+    field_type = str(schema.get("type") or "")
+    if value is None or value == "" or value == []:
+        return None, None
+
+    if field_type in {
+        "text", "long_text", "url",
+        "email", "phone_number",
+    }:
+        if isinstance(value, list):
+            return format_list(value), None
+        if isinstance(value, dict):
+            rendered = (
+                value.get("value")
+                or value.get("name")
+                or json.dumps(value, ensure_ascii=False)
+            )
+            return str(rendered).strip(), None
+        return str(value).strip(), None
+
+    if field_type == "single_select":
+        raw = (
+            value.get("value")
+            if isinstance(value, dict)
+            else value
+        )
+        raw_text = str(raw).strip()
+        options = orders_select_options(field_name)
+        for option in options:
+            if normalize_text(option) == normalize_text(raw_text):
+                return option, None
+        return None, (
+            f"{field_name} 的值「{raw_text}」不在现有选项中，已跳过。"
+        )
+
+    if field_type == "multiple_select":
+        requested = normalize_multi_text(value)
+        options = orders_select_options(field_name)
+        accepted: List[str] = []
+        rejected: List[str] = []
+
+        for item in requested:
+            match = next(
+                (
+                    opt for opt in options
+                    if normalize_text(opt)
+                    == normalize_text(item)
+                ),
+                None,
+            )
+            if match:
+                accepted.append(match)
+            else:
+                rejected.append(item)
+
+        warning = None
+        if rejected:
+            warning = (
+                f"{field_name} 中这些值不在现有选项中，已跳过："
+                + "、".join(rejected)
+            )
+        return dedupe(accepted), warning
+
+    if field_type == "boolean":
+        return boolish(value), None
+
+    if field_type == "number":
+        number = to_number(value)
+        if number is None:
+            return None, f"{field_name} 不能转换成数字，已跳过。"
+        return number, None
+
+    if field_type == "date":
+        normalized = normalize_date_for_baserow(value)
+        if normalized:
+            return normalized, None
+        return None, f"{field_name} 日期无法确认，已跳过。"
+
+    return None, f"{field_name} ({field_type}) 暂不自动写入。"
+
+
+def parsed_order_to_orders_payload(
+    parsed: Dict[str, Any],
+    original_text: str,
+    source_platform: str,
+    status: str,
+) -> Tuple[Dict[str, Any], List[str]]:
+    fields = orders_field_map()
+    info = parsed.get("order_info", {})
+
+    proposals: Dict[str, Any] = {
+        "Order ID": info.get("Order ID"),
+        "Job Type": info.get("Job Type"),
+        "Working Cities": info.get("Working Cities"),
+        "Original Text": str(original_text or "").strip(),
+        "Standard JSON": json.dumps(
+            parsed,
+            ensure_ascii=False,
+            default=str,
+        ),
+        "Source Platform": source_platform,
+        "Status": status,
+        "Salary Text": info.get("Salary Text"),
+        "Start Date": info.get("Start Date"),
+    }
+
+    payload: Dict[str, Any] = {}
+    warnings: List[str] = []
+
+    for field_name, value in proposals.items():
+        if field_name not in fields:
+            continue
+        serialized, warning = serialize_orders_value(
+            field_name,
+            value,
+        )
+        if warning:
+            warnings.append(warning)
+        if serialized is not None:
+            payload[field_name] = serialized
+
+    primary_fields = [
+        schema
+        for schema in fields.values()
+        if schema.get("primary")
+        and schema.get("type") in {"text", "long_text"}
+    ]
+
+    for schema in primary_fields:
+        name = str(schema.get("name"))
+        if payload.get(name):
+            continue
+
+        fallback = str(
+            info.get("Order ID")
+            or (
+                f"{format_list(info.get('Working Cities'))} "
+                f"{info.get('Job Type') or '订单'}"
+            )
+        ).strip()
+        if fallback:
+            payload[name] = fallback
+
+    return payload, warnings
+
+
+def save_standard_order_to_orders(
+    parsed: Dict[str, Any],
+    original_text: str,
+    source_platform: str,
+    status: str,
+) -> Tuple[Dict[str, Any], List[str]]:
+    payload, warnings = parsed_order_to_orders_payload(
+        parsed,
+        original_text,
+        source_platform,
+        status,
+    )
+    if not payload:
+        raise RuntimeError(
+            "Orders 表没有可写入字段。请先按 V2.4 字段清单建立 Orders 表。"
+        )
+    created = orders_create_row(payload)
+    return created, warnings
+
+
+def order_status_text(row: Dict[str, Any]) -> str:
+    value = row.get("Status")
+    if isinstance(value, dict):
+        value = value.get("value") or value.get("name")
+    return str(value or "").strip()
+
+
+def order_created_datetime(row: Dict[str, Any]):
+    from datetime import datetime, timezone
+
+    for field in [
+        "Created At",
+        "Created",
+        "Created On",
+        "created_on",
+    ]:
+        raw = row.get(field)
+        if not raw:
+            continue
+
+        text_value = str(raw).strip()
+
+        try:
+            return datetime.fromisoformat(
+                text_value.replace("Z", "+00:00")
+            )
+        except Exception:
+            pass
+
+        for fmt in [
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%Y-%m-%d %H:%M:%S",
+        ]:
+            try:
+                return datetime.strptime(
+                    text_value,
+                    fmt,
+                ).replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+
+    return None
+
+
+def order_age_days(row: Dict[str, Any]) -> Optional[int]:
+    from datetime import datetime, timezone
+
+    created = order_created_datetime(row)
+    if created is None:
+        return None
+
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    return max(0, (now - created).days)
+
+
+def parsed_from_orders_row(
+    row: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    raw = (
+        row.get("Standard JSON")
+        or row.get("Standardized JSON")
+        or row.get("Parsed Order JSON")
+    )
+
+    if raw:
+        if isinstance(raw, dict):
+            parsed = dict(raw)
+        else:
+            try:
+                parsed = json.loads(str(raw))
+            except Exception:
+                parsed = None
+
+        if isinstance(parsed, dict):
+            parsed.setdefault("order_info", {})
+            info = parsed["order_info"]
+            if not info.get("Order ID"):
+                info["Order ID"] = row.get("Order ID")
+            return parsed
+
+    return {
+        "order_info": {
+            "Order ID": row.get("Order ID"),
+            "Job Type": row.get("Job Type"),
+            "Working Cities": normalize_multi_text(
+                row.get("Working Cities")
+            ),
+            "Salary Text": row.get("Salary Text"),
+            "Start Date": row.get("Start Date"),
+        },
+        "hard_requirements": {},
+        "preferred_requirements": {},
+        "reference_requirements": {},
+        "compound_requirements": [],
+        "manual_review": {},
+    }
+
+
+def filter_orders_rows(
+    rows: List[Dict[str, Any]],
+    days: Optional[int],
+    allowed_statuses: Optional[List[str]] = None,
+    history_only: bool = False,
+) -> List[Dict[str, Any]]:
+    normalized_statuses = {
+        normalize_text(item)
+        for item in (allowed_statuses or [])
+    }
+
+    filtered: List[Dict[str, Any]] = []
+
+    for row in rows:
+        status = normalize_text(order_status_text(row))
+
+        if (
+            normalized_statuses
+            and status not in normalized_statuses
+        ):
+            continue
+
+        age = order_age_days(row)
+
+        if history_only:
+            if age is None or age <= 30:
+                continue
+        elif (
+            days is not None
+            and age is not None
+            and age > days
+        ):
+            continue
+
+        filtered.append(row)
+
+    filtered.sort(
+        key=lambda row: (
+            order_created_datetime(row)
+            or __import__("datetime").datetime.min.replace(
+                tzinfo=__import__("datetime").timezone.utc
+            )
+        ),
+        reverse=True,
+    )
+    return filtered
+
+
+def filtered_parsed_orders_from_db(
+    days: Optional[int],
+    active_only: bool = True,
+) -> List[Dict[str, Any]]:
+    statuses = (
+        ["招聘中", "面试中"]
+        if active_only
+        else None
+    )
+
+    rows = filter_orders_rows(
+        load_orders_from_baserow(),
+        days=days,
+        allowed_statuses=statuses,
+    )
+
+    parsed_orders: List[Dict[str, Any]] = []
+    for row in rows:
+        parsed = parsed_from_orders_row(row)
+        if parsed:
+            parsed["_orders_row"] = row
+            parsed_orders.append(parsed)
+
+    return parsed_orders
+
+
+def orders_management_rows(
+    rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+
+    for row in rows:
+        parsed = parsed_from_orders_row(row) or {}
+        info = parsed.get("order_info", {})
+
+        result.append({
+            "订单编号": (
+                row.get("Order ID")
+                or info.get("Order ID")
+                or "未识别"
+            ),
+            "城市": format_list(
+                info.get("Working Cities")
+                or row.get("Working Cities")
+            ),
+            "岗位": (
+                row.get("Job Type")
+                or info.get("Job Type")
+                or "未识别"
+            ),
+            "状态": order_status_text(row) or "未设置",
+            "建立时间": (
+                row.get("Created At")
+                or row.get("Created")
+                or "未填写"
+            ),
+            "距今天数": (
+                order_age_days(row)
+                if order_age_days(row) is not None
+                else "未知"
+            ),
+            "来源": row.get("Source Platform") or "未填写",
+        })
+
+    return result
 
 
 
@@ -3838,7 +4394,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.3.3 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.4 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -3869,7 +4425,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.3.3 treats ``Original Resume`` as the canonical full-resume field.
+    V2.4 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -4189,7 +4745,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.3.3 PDF RESUME EXPORT
+# 8D. V2.4 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -4997,7 +5553,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.3.3 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
+    st.caption("V2.4 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -5019,9 +5575,24 @@ with st.sidebar:
     st.divider()
     st.markdown("### 老师数据库")
     st.metric("老师总数", len(teachers))
+
+    st.divider()
+    st.markdown("### 订单数据库")
+    if ORDERS_TABLE_ID is None:
+        st.warning("未配置 ORDERS_TABLE_ID")
+    else:
+        try:
+            sidebar_orders = load_orders_from_baserow()
+            st.success("Orders 已连接")
+            st.metric("订单总数", len(sidebar_orders))
+        except Exception as exc:
+            st.error("Orders 连接失败")
+            st.caption(str(exc)[:300])
     if st.button("刷新老师数据", use_container_width=True):
         load_teachers.clear()
         load_baserow_fields.clear()
+        load_orders_from_baserow.clear()
+        load_orders_fields.clear()
         st.rerun()
 
     st.divider()
@@ -5050,7 +5621,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.3.3：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.4：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -5062,6 +5633,8 @@ mode = st.radio(
         "③ 选择老师 → 匹配全部订单",
         "④ 根据订单优化老师简历",
         "⑤ 新老师录入 → 保存到 Baserow",
+        "⑥ 招聘信息录入 → 保存到 Orders",
+        "⑦ 订单库 → 时间 / 状态管理",
     ],
     horizontal=True,
 )
@@ -5158,7 +5731,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.3.3 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.4 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -5360,8 +5933,78 @@ elif mode == "③ 选择老师 → 匹配全部订单":
 
     recent_batch = st.session_state.get("batch_parsed_orders") or []
     use_recent = False
+    use_orders_db = False
+    orders_db_batch: List[Dict[str, Any]] = []
 
-    if recent_batch:
+    if ORDERS_TABLE_ID is not None:
+        st.markdown("### 订单来源")
+        reverse_source = st.radio(
+            "选择订单来源",
+            [
+                "Orders订单库",
+                "当前会话标准订单池",
+                "临时粘贴新订单",
+            ],
+            horizontal=False,
+            key="reverse_source_v24",
+        )
+
+        if reverse_source == "Orders订单库":
+            reverse_range = st.selectbox(
+                "订单时间范围",
+                ["最近7天", "最近14天", "最近21天", "最近30天", "全部订单"],
+                index=3,
+                key="reverse_range_v24",
+            )
+            reverse_days_map = {
+                "最近7天": 7,
+                "最近14天": 14,
+                "最近21天": 21,
+                "最近30天": 30,
+                "全部订单": None,
+            }
+            reverse_active_only = st.checkbox(
+                "只看招聘中 / 面试中订单",
+                value=True,
+                key="reverse_active_only_v24",
+            )
+
+            try:
+                orders_db_batch = filtered_parsed_orders_from_db(
+                    reverse_days_map[reverse_range],
+                    active_only=reverse_active_only,
+                )
+                st.success(
+                    f"已从 Orders 读取 {len(orders_db_batch)} 条订单。"
+                    "这一步不需要重新调用 Gemini。"
+                )
+                if orders_db_batch:
+                    st.dataframe(
+                        standardized_preview_rows(orders_db_batch),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+            except Exception as exc:
+                render_api_error(exc)
+                orders_db_batch = []
+
+            use_orders_db = True
+
+        elif reverse_source == "当前会话标准订单池":
+            if recent_batch:
+                use_recent = True
+                st.dataframe(
+                    standardized_preview_rows(recent_batch),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("当前会话还没有标准订单池。")
+        else:
+            use_recent = False
+            use_orders_db = False
+
+    elif recent_batch:
         use_recent = st.checkbox(
             f"直接使用最近一次已确认的 {len(recent_batch)} 条标准订单（0 次 Gemini 请求）",
             value=True,
@@ -5374,7 +6017,14 @@ elif mode == "③ 选择老师 → 匹配全部订单":
                 hide_index=True,
             )
 
-    if not recent_batch or not use_recent:
+    if (
+        (not ORDERS_TABLE_ID and (not recent_batch or not use_recent))
+        or (
+            ORDERS_TABLE_ID is not None
+            and not use_recent
+            and not use_orders_db
+        )
+    ):
         st.markdown("### 如果不使用当前订单池，也可以在这里建立新的标准订单池")
         reverse_raw_text = st.text_area(
             "粘贴不同平台的原始订单",
@@ -5463,11 +6113,17 @@ elif mode == "③ 选择老师 → 匹配全部订单":
         else:
             try:
                 selected_teacher = teachers[selected_teacher_index]
-                if use_recent:
+                if use_orders_db:
+                    parsed_orders = orders_db_batch
+                elif use_recent:
                     parsed_orders = recent_batch
                 else:
                     standard_text = st.session_state.get("reverse_standard_editor", "")
-                    parsed_orders = parse_standardized_orders_text(standard_text) if standard_text else []
+                    parsed_orders = (
+                        parse_standardized_orders_text(standard_text)
+                        if standard_text
+                        else []
+                    )
 
                 if not parsed_orders:
                     st.warning("请先准备并确认标准订单。")
@@ -5565,23 +6221,74 @@ elif mode == "④ 根据订单优化老师简历":
     parsed_target: Optional[Dict[str, Any]] = None
 
     st.markdown("### ② 选择目标订单")
-    if available_orders:
-        source_mode = st.radio(
-            "订单来源",
-            ["使用当前标准订单池", "粘贴一条新的雇主需求"],
-            horizontal=True,
-            key="resume_order_source_mode_v20",
-        )
-    else:
-        source_mode = "粘贴一条新的雇主需求"
-        st.info("当前还没有标准订单池。可以先在这里粘贴一条订单，或先去『② 批量订单』建立标准订单池。")
 
-    if source_mode == "使用当前标准订单池":
+    source_options = []
+    if ORDERS_TABLE_ID is not None:
+        source_options.append("使用 Orders 订单库")
+    if available_orders:
+        source_options.append("使用当前标准订单池")
+    source_options.append("粘贴一条新的雇主需求")
+
+    source_mode = st.radio(
+        "订单来源",
+        source_options,
+        horizontal=False,
+        key="resume_order_source_mode_v24",
+    )
+
+    if source_mode == "使用 Orders 订单库":
+        resume_range = st.selectbox(
+            "订单时间范围",
+            ["最近7天", "最近14天", "最近21天", "最近30天", "全部订单"],
+            index=3,
+            key="resume_order_range_v24",
+        )
+        resume_days_map = {
+            "最近7天": 7,
+            "最近14天": 14,
+            "最近21天": 21,
+            "最近30天": 30,
+            "全部订单": None,
+        }
+        resume_active_only = st.checkbox(
+            "只看招聘中 / 面试中订单",
+            value=True,
+            key="resume_active_only_v24",
+        )
+
+        try:
+            available_orders = filtered_parsed_orders_from_db(
+                resume_days_map[resume_range],
+                active_only=resume_active_only,
+            )
+        except Exception as exc:
+            render_api_error(exc)
+            available_orders = []
+
+        if available_orders:
+            order_indexes_v20 = list(range(len(available_orders)))
+            selected_order_index = st.selectbox(
+                "目标订单",
+                order_indexes_v20,
+                format_func=lambda index: order_title(
+                    available_orders[index],
+                    index + 1,
+                ),
+                key="resume_optimizer_orders_db_select_v24",
+            )
+            parsed_target = available_orders[selected_order_index]
+        else:
+            st.info("当前筛选条件下没有 Orders 订单。")
+
+    elif source_mode == "使用当前标准订单池":
         order_indexes_v20 = list(range(len(available_orders)))
         selected_order_index = st.selectbox(
             "目标订单",
             order_indexes_v20,
-            format_func=lambda index: order_title(available_orders[index], index + 1),
+            format_func=lambda index: order_title(
+                available_orders[index],
+                index + 1,
+            ),
             key="resume_optimizer_order_select_v20",
         )
         parsed_target = available_orders[selected_order_index]
@@ -5968,7 +6675,7 @@ elif mode == "④ 根据订单优化老师简历":
 # 16. MODE 5 - NEW TEACHER INTAKE
 # ============================================================
 
-else:
+elif mode == "⑤ 新老师录入 → 保存到 Baserow":
     st.markdown('<div class="section-title">新老师录入 → 保存到 Baserow</div>', unsafe_allow_html=True)
     st.caption(
         "把新老师完整简历粘贴进来，并可上传老师照片。Gemini 只负责把简历解析成当前 Teachers 表已有字段；"
@@ -6187,14 +6894,410 @@ else:
         )
 
 
+
+# ============================================================
+# 17. MODE 6 - RECRUITMENT ORDER INTAKE
+# ============================================================
+
+elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
+    st.markdown(
+        '<div class="section-title">招聘信息录入 / 入库中心</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "微信群、中介、朋友圈、招聘平台等不同格式可以一次粘贴多条。"
+        "Gemini 第一次负责统一格式；人工确认后保存到 Baserow Orders。"
+        "以后直接从订单库读取，不需要重复输入。"
+    )
+
+    if ORDERS_TABLE_ID is None:
+        st.error(
+            "尚未配置 ORDERS_TABLE_ID。请先在 Baserow 建立 Orders 表，"
+            "再把表 ID 加到 Streamlit Secrets。"
+        )
+        st.code('ORDERS_TABLE_ID="你的 Orders 表 ID"')
+        st.stop()
+
+    try:
+        current_orders_fields = orders_field_map()
+    except Exception as exc:
+        st.error("无法读取 Baserow Orders 表字段。")
+        st.exception(exc)
+        st.stop()
+
+    recommended = {
+        "Order ID": "Text",
+        "Job Type": "Text 或 Single select",
+        "Working Cities": "Multiple select 或 Long text",
+        "Original Text": "Long text",
+        "Standard JSON": "Long text",
+        "Source Platform": "Single select 或 Text",
+        "Status": "Single select",
+        "Salary Text": "Long text",
+        "Start Date": "Text 或 Date",
+    }
+
+    missing = [
+        field
+        for field in recommended
+        if field not in current_orders_fields
+    ]
+    if missing:
+        with st.expander("⚠️ Orders 表还缺少部分推荐字段", expanded=True):
+            for field in missing:
+                st.write(f"`{field}` → {recommended[field]}")
+            st.caption(
+                "缺少字段时系统只保存当前存在的字段；"
+                "建议补齐后再正式大量录入订单。"
+            )
+    else:
+        st.success("✅ Orders 核心字段已检测到。")
+
+    source_platform = st.selectbox(
+        "信息来源",
+        [
+            "微信/微信群",
+            "中介派单",
+            "朋友圈",
+            "小红书",
+            "招聘平台",
+            "其他",
+        ],
+        key="v24_order_source_platform",
+    )
+
+    save_status = st.selectbox(
+        "保存后的订单状态",
+        ["招聘中", "面试中", "暂停", "已成交", "已关闭"],
+        key="v24_order_save_status",
+    )
+
+    raw_orders = st.text_area(
+        "粘贴招聘信息（支持一次粘贴多条）",
+        height=620,
+        key="v24_order_raw_text",
+        placeholder="直接把不同平台的招聘信息复制到这里，可以一次粘贴多条。",
+    )
+
+    o1, o2 = st.columns([4, 1])
+    with o1:
+        parse_orders_button = st.button(
+            "① AI统一订单格式",
+            type="primary",
+            use_container_width=True,
+            key="v24_parse_orders",
+        )
+    with o2:
+        clear_orders_button = st.button(
+            "清除",
+            use_container_width=True,
+            key="v24_clear_orders",
+        )
+
+    if clear_orders_button:
+        for key in list(st.session_state.keys()):
+            if key.startswith("v24_order_"):
+                st.session_state.pop(key, None)
+        st.rerun()
+
+    if parse_orders_button:
+        if not raw_orders.strip():
+            st.warning("请先粘贴招聘信息。")
+        else:
+            try:
+                with st.spinner("Gemini 正在把不同平台招聘信息统一成标准订单..."):
+                    parsed_orders = parse_employer_orders_batch(raw_orders)
+                    source_blocks = split_batch_orders(raw_orders)
+
+                st.session_state["v24_order_parsed"] = parsed_orders
+                st.session_state["v24_order_source_blocks"] = source_blocks
+                st.success(f"已识别 {len(parsed_orders)} 条标准订单。")
+            except Exception as exc:
+                render_api_error(exc)
+
+    parsed_orders = st.session_state.get("v24_order_parsed", [])
+    source_blocks = st.session_state.get("v24_order_source_blocks", [])
+
+    if parsed_orders:
+        st.divider()
+        st.markdown("### ② 人工确认标准订单")
+
+        confirmed: List[Tuple[Dict[str, Any], str]] = []
+
+        for index, parsed in enumerate(parsed_orders, start=1):
+            info = parsed.get("order_info", {})
+            label = (
+                f"{index}. {info.get('Order ID') or '未识别'} · "
+                f"{format_list(info.get('Working Cities'))} · "
+                f"{info.get('Job Type') or '未识别'}"
+            )
+
+            with st.expander(label, expanded=index == 1):
+                editor_key = f"v24_order_json_editor_{index}"
+                if editor_key not in st.session_state:
+                    st.session_state[editor_key] = json.dumps(
+                        parsed,
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    )
+
+                edited_json_text = st.text_area(
+                    "标准订单 JSON（可人工修改）",
+                    height=520,
+                    key=editor_key,
+                )
+
+                try:
+                    edited_json = json.loads(edited_json_text)
+                    if isinstance(edited_json, dict):
+                        source_text = (
+                            source_blocks[index - 1]
+                            if index - 1 < len(source_blocks)
+                            else raw_orders
+                        )
+                        confirmed.append((edited_json, source_text))
+                        st.success("JSON 格式正确")
+                    else:
+                        st.error("标准订单顶层必须是 JSON object。")
+                except Exception as exc:
+                    st.error(f"JSON 当前无法读取：{exc}")
+
+        st.divider()
+        st.markdown("### ③ 保存到 Orders")
+
+        if st.button(
+            f"② 确认并保存 {len(confirmed)} 条订单",
+            type="primary",
+            use_container_width=True,
+            key="v24_save_orders",
+            disabled=not bool(confirmed),
+        ):
+            success_count = 0
+            all_warnings: List[str] = []
+
+            for parsed, original_text in confirmed:
+                try:
+                    _created, warnings = save_standard_order_to_orders(
+                        parsed,
+                        original_text,
+                        source_platform,
+                        save_status,
+                    )
+                    success_count += 1
+                    all_warnings.extend(warnings)
+                except Exception as exc:
+                    order_id = (
+                        parsed.get("order_info", {}).get("Order ID")
+                        or "未识别"
+                    )
+                    st.error(f"订单 {order_id} 保存失败：{exc}")
+
+            if success_count:
+                st.success(f"✅ 已保存 {success_count} 条订单到 Orders。")
+                st.info(
+                    "以后可以在「⑦ 订单库」按最近7/14/21/30天查看，"
+                    "不需要再次输入这些招聘信息。"
+                )
+
+            if all_warnings:
+                with st.expander("保存提示"):
+                    for warning in dedupe(all_warnings):
+                        st.warning(warning)
+
+
+# ============================================================
+# 18. MODE 7 - ORDERS DATABASE / MANAGEMENT
+# ============================================================
+
+elif mode == "⑦ 订单库 → 时间 / 状态管理":
+    st.markdown(
+        '<div class="section-title">订单库 / 订单管理</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "已经录入的招聘信息永久保存在 Orders。"
+        "可以按建立时间和订单状态筛选，无需每次重新粘贴。"
+    )
+
+    if ORDERS_TABLE_ID is None:
+        st.error("尚未配置 ORDERS_TABLE_ID。")
+        st.stop()
+
+    try:
+        all_orders = load_orders_from_baserow()
+    except Exception as exc:
+        render_api_error(exc)
+        st.stop()
+
+    f1, f2 = st.columns(2)
+
+    with f1:
+        date_filter = st.selectbox(
+            "建立时间",
+            [
+                "最近7天",
+                "最近14天",
+                "最近21天",
+                "最近30天",
+                "30天以上历史订单",
+                "全部订单",
+            ],
+            key="v24_orders_date_filter",
+        )
+
+    with f2:
+        status_filter = st.selectbox(
+            "订单状态",
+            ["全部", "招聘中", "面试中", "暂停", "已成交", "已关闭"],
+            key="v24_orders_status_filter",
+        )
+
+    day_map = {
+        "最近7天": 7,
+        "最近14天": 14,
+        "最近21天": 21,
+        "最近30天": 30,
+        "全部订单": None,
+    }
+
+    if date_filter == "30天以上历史订单":
+        filtered = filter_orders_rows(
+            all_orders,
+            days=None,
+            history_only=True,
+        )
+    else:
+        filtered = filter_orders_rows(
+            all_orders,
+            days=day_map.get(date_filter),
+        )
+
+    if status_filter != "全部":
+        filtered = [
+            row
+            for row in filtered
+            if normalize_text(order_status_text(row))
+            == normalize_text(status_filter)
+        ]
+
+    st.metric("当前筛选订单", len(filtered))
+
+    if not filtered:
+        st.info("当前条件下没有订单。")
+    else:
+        st.dataframe(
+            orders_management_rows(filtered),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("### 逐单查看")
+
+        for index, row in enumerate(filtered, start=1):
+            parsed = parsed_from_orders_row(row) or {}
+            info = parsed.get("order_info", {})
+
+            order_id = (
+                row.get("Order ID")
+                or info.get("Order ID")
+                or "未识别"
+            )
+
+            label = (
+                f"{index}. {order_id} · "
+                f"{format_list(info.get('Working Cities'))} · "
+                f"{row.get('Job Type') or info.get('Job Type') or '未识别'} · "
+                f"{order_status_text(row) or '未设置'}"
+            )
+
+            with st.expander(label):
+                st.write(
+                    "建立时间：",
+                    row.get("Created At") or row.get("Created") or "未填写",
+                )
+                st.write(
+                    "距今天数：",
+                    order_age_days(row)
+                    if order_age_days(row) is not None
+                    else "未知",
+                )
+                st.write(
+                    "来源：",
+                    row.get("Source Platform") or "未填写",
+                )
+                st.write(
+                    "薪资：",
+                    row.get("Salary Text")
+                    or info.get("Salary Text")
+                    or "未填写",
+                )
+
+                current_status = order_status_text(row) or "招聘中"
+                status_options = [
+                    "招聘中",
+                    "面试中",
+                    "暂停",
+                    "已成交",
+                    "已关闭",
+                ]
+                if current_status not in status_options:
+                    status_options.insert(0, current_status)
+
+                new_status = st.selectbox(
+                    "修改状态",
+                    status_options,
+                    index=status_options.index(current_status),
+                    key=(
+                        "v24_status_"
+                        f"{row.get('Baserow Order Row ID')}"
+                    ),
+                )
+
+                if st.button(
+                    "保存状态",
+                    key=(
+                        "v24_save_status_"
+                        f"{row.get('Baserow Order Row ID')}"
+                    ),
+                    use_container_width=True,
+                ):
+                    try:
+                        serialized, warning = serialize_orders_value(
+                            "Status",
+                            new_status,
+                        )
+                        if warning:
+                            st.warning(warning)
+                        if serialized is not None:
+                            orders_update_row(
+                                row.get("Baserow Order Row ID"),
+                                {"Status": serialized},
+                            )
+                            st.success("状态已更新")
+                            st.rerun()
+                    except Exception as exc:
+                        render_api_error(exc)
+
+                with st.expander("原始招聘信息"):
+                    st.text(row.get("Original Text") or "")
+
+                with st.expander("标准订单 JSON"):
+                    st.json(parsed, expanded=False)
+
+
+# ============================================================
+# 19. FOOTER
+# ============================================================
 # ============================================================
 # 17. FOOTER
 # ============================================================
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.3.3 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.4 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
 ORDERS_TABLE_ID="1129374"
+
