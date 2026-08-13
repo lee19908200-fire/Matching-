@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.4.3
+# AI Teacher Matching System V2.4.4
 # Single-file Streamlit app
 #
 # Goals
@@ -78,7 +78,7 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.4.3",
+    page_title="AI Teacher Matching System V2.4.4",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -88,7 +88,7 @@ st.markdown(
     """
     <style>
       /* ---------------------------------------------------------
-         V2.4.3 responsive layout
+         V2.4.4 responsive layout
          Desktop remains wide; phones automatically become a
          single-column, touch-friendly interface.
          --------------------------------------------------------- */
@@ -1125,7 +1125,7 @@ def save_original_resume_for_teacher(
 
 
 # ============================================================
-# 4B. V2.4.3 BASEROW ORDERS DATABASE
+# 4B. V2.4.4 BASEROW ORDERS DATABASE
 # ============================================================
 
 def baserow_orders_headers() -> Dict[str, str]:
@@ -1446,7 +1446,7 @@ def save_standard_order_to_orders(
     )
     if not payload:
         raise RuntimeError(
-            "Orders 表没有可写入字段。请先按 V2.4.3 字段清单建立 Orders 表。"
+            "Orders 表没有可写入字段。请先按 V2.4.4 字段清单建立 Orders 表。"
         )
     created = orders_create_row(payload)
     return created, warnings
@@ -1690,7 +1690,7 @@ def orders_management_rows(
 
 
 # ============================================================
-# 4C. V2.4.3 GEMINI FAILURE FALLBACK
+# 4C. V2.4.4 GEMINI FAILURE FALLBACK
 # ============================================================
 
 def build_pending_order_from_raw(raw_text, source_platform):
@@ -1946,6 +1946,186 @@ def generate_content_resilient(
         "如果目标订单已经在标准订单池中，请直接使用标准订单池，"
         "该步骤无需再次调用 Gemini。"
     ) from first_error
+
+
+
+# ============================================================
+# 5B. V2.4.4 IMAGE / SCREENSHOT -> EDITABLE TEXT
+# ============================================================
+
+
+def _clean_extracted_image_text(value: str) -> str:
+    text_value = str(value or "").strip()
+    text_value = re.sub(r"^```(?:text|markdown)?\\s*", "", text_value, flags=re.I)
+    text_value = re.sub(r"\\s*```$", "", text_value)
+    return text_value.strip()
+
+
+def extract_text_from_uploaded_images(
+    uploaded_files: List[Any],
+    purpose_label: str,
+) -> Tuple[str, str]:
+    """Use Gemini multimodal understanding to transcribe screenshots/images."""
+    files = [item for item in (uploaded_files or []) if item is not None]
+    if not files:
+        raise ValueError("请先上传至少一张图片。")
+    if len(files) > 10:
+        raise ValueError("一次最多处理 10 张图片，请分批上传。")
+
+    client = gemini_client()
+    preferred = str(GEMINI_MODEL or "").strip()
+
+    prompt = f"""
+你正在做图片文字转录。用途：{purpose_label}。
+
+任务：
+1. 按图片上传顺序，完整提取所有清晰可见的文字。
+2. 保留原有段落、换行、编号、金额、日期、订单号、城市、人名、电话、符号和中英文。
+3. 不总结，不改写，不纠错，不补充图片中没有的信息。
+4. 多张图片之间用单独一行分隔：===== 截图 N =====
+5. 如果某处看不清，用【看不清】标记，不要猜。
+6. 只返回提取后的文字，不要解释过程，不要返回 JSON，不要加 Markdown 代码块。
+""".strip()
+
+    contents: List[Any] = [prompt]
+    for uploaded in files:
+        data = uploaded.getvalue()
+        if not data:
+            continue
+        mime_type = str(getattr(uploaded, "type", "") or "image/jpeg").strip()
+        contents.append(
+            types.Part.from_bytes(
+                data=data,
+                mime_type=mime_type,
+            )
+        )
+
+    if len(contents) == 1:
+        raise ValueError("上传的图片没有可读取内容。")
+
+    candidates = [preferred]
+    try:
+        available = list_generate_models(client)
+        alternatives = [
+            model
+            for model in available
+            if "flash" in model.lower() and model != preferred
+        ]
+        if alternatives:
+            candidates.append(alternatives[0])
+    except Exception:
+        pass
+
+    first_error: Optional[Exception] = None
+    attempted: List[str] = []
+
+    for model_name in dedupe(candidates):
+        if not model_name:
+            continue
+        attempted.append(model_name)
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+            )
+            result = _clean_extracted_image_text(
+                getattr(response, "text", "")
+            )
+            if not result:
+                raise RuntimeError("Gemini 没有返回可用的图片文字。")
+            return result, model_name
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+            if not (
+                is_gemini_not_found_error(exc)
+                or is_transient_gemini_error(exc)
+            ):
+                raise
+
+    raise RuntimeError(
+        "GEMINI_IMAGE_TEXT_UNAVAILABLE: 图片文字提取暂时失败。"
+        f"已尝试模型：{', '.join(attempted) or preferred}。"
+        "原输入内容不会丢失，可以稍后重试。"
+    ) from first_error
+
+
+def render_image_text_import(
+    target_text_key: str,
+    uploader_key: str,
+    purpose_label: str,
+    multiple: bool = True,
+) -> None:
+    """Render screenshot upload + extraction before a text_area widget."""
+    st.caption("也可以上传截图/图片，AI 会把图片文字提取到下面的可编辑输入框。")
+
+    uploaded = st.file_uploader(
+        "📷 上传截图 / 图片提取文字",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=multiple,
+        key=uploader_key,
+        help=(
+            "支持微信截图、招聘信息截图、老师简历截图等。"
+            "提取后仍可在文字框中人工修改。"
+        ),
+    )
+
+    if uploaded is None:
+        files: List[Any] = []
+    elif isinstance(uploaded, list):
+        files = uploaded
+    else:
+        files = [uploaded]
+
+    if files:
+        st.caption(
+            "已选择：" + "、".join(str(item.name) for item in files)
+        )
+
+    button_key = f"{uploader_key}_extract_button"
+    signature_key = f"{uploader_key}_last_signature"
+
+    if st.button(
+        "从图片提取文字并加入输入框",
+        use_container_width=True,
+        key=button_key,
+        disabled=not bool(files),
+    ):
+        signature = tuple(
+            (
+                str(getattr(item, "name", "")),
+                int(getattr(item, "size", 0) or 0),
+            )
+            for item in files
+        )
+
+        if st.session_state.get(signature_key) == signature:
+            st.info("这组图片已经提取过。更换图片后可再次提取，避免重复追加文字。")
+        else:
+            try:
+                with st.spinner("Gemini 正在读取图片文字..."):
+                    extracted, model_used = extract_text_from_uploaded_images(
+                        files,
+                        purpose_label,
+                    )
+
+                existing = str(
+                    st.session_state.get(target_text_key, "") or ""
+                ).strip()
+                combined = (
+                    f"{existing}\\n\\n{extracted}".strip()
+                    if existing
+                    else extracted
+                )
+                st.session_state[target_text_key] = combined
+                st.session_state[signature_key] = signature
+                st.success(
+                    f"✅ 已从 {len(files)} 张图片提取文字并加入输入框。"
+                    f"模型：{model_used}。"
+                )
+                st.rerun()
+            except Exception as exc:
+                render_api_error(exc)
 
 
 def build_parser_prompt(employer_request: str) -> str:
@@ -4576,7 +4756,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.4.3 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.4.4 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -4607,7 +4787,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.4.3 treats ``Original Resume`` as the canonical full-resume field.
+    V2.4.4 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -4927,7 +5107,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.4.3 PDF RESUME EXPORT
+# 8D. V2.4.4 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -5735,7 +5915,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.4.3 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
+    st.caption("V2.4.4 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -5803,7 +5983,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.4.3：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.4.4：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -5836,6 +6016,13 @@ if mode == "① 单个订单 → 匹配全部老师":
         "要求：40岁以内；英语好；本科及以上学历。"
     )
 
+    render_image_text_import(
+        target_text_key="single_request_text",
+        uploader_key="single_request_images_v244",
+        purpose_label="单个雇主招聘订单",
+        multiple=True,
+    )
+
     single_request = st.text_area(
         "雇主需求",
         height=220,
@@ -5850,7 +6037,12 @@ if mode == "① 单个订单 → 匹配全部老师":
         single_clear = st.button("清除单单结果", use_container_width=True)
 
     if single_clear:
-        for key in ["single_parsed_order", "single_matching_results"]:
+        for key in [
+            "single_request_text",
+            "single_parsed_order",
+            "single_matching_results",
+            "single_request_images_v244_last_signature",
+        ]:
             st.session_state.pop(key, None)
         st.rerun()
 
@@ -5911,11 +6103,18 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.4.3 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.4.4 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
     st.markdown("### 第一步：粘贴不同平台的原始雇主需求")
+    render_image_text_import(
+        target_text_key="batch_raw_request_text",
+        uploader_key="batch_order_images_v244",
+        purpose_label="批量招聘订单/微信群派单信息",
+        multiple=True,
+    )
+
     batch_raw_text = st.text_area(
         "原始订单信息",
         height=420,
@@ -6214,6 +6413,13 @@ elif mode == "③ 选择老师 → 匹配全部订单":
         )
     ):
         st.markdown("### 如果不使用当前订单池，也可以在这里建立新的标准订单池")
+        render_image_text_import(
+            target_text_key="reverse_raw_request_text_v17",
+            uploader_key="reverse_order_images_v244",
+            purpose_label="反向匹配临时招聘订单",
+            multiple=True,
+        )
+
         reverse_raw_text = st.text_area(
             "粘贴不同平台的原始订单",
             height=360,
@@ -6481,6 +6687,13 @@ elif mode == "④ 根据订单优化老师简历":
         )
         parsed_target = available_orders[selected_order_index]
     else:
+        render_image_text_import(
+            target_text_key="resume_optimizer_raw_order_v20",
+            uploader_key="resume_target_order_images_v244",
+            purpose_label="简历优化目标雇主订单",
+            multiple=True,
+        )
+
         resume_raw_order = st.text_area(
             "粘贴 1 条目标雇主需求",
             height=220,
@@ -6574,6 +6787,13 @@ elif mode == "④ 根据订单优化老师简历":
             "把老师完整简历粘贴进去。"
         )
 
+    render_image_text_import(
+        target_text_key=resume_editor_key,
+        uploader_key=f"resume_source_images_v244_{teacher_identity}",
+        purpose_label="老师原始简历",
+        multiple=True,
+    )
+
     original_resume_text = st.text_area(
         "老师原始简历（已自动载入，可在本次生成前人工补充）",
         height=520,
@@ -6632,6 +6852,13 @@ elif mode == "④ 根据订单优化老师简历":
     employer_editor_key = f"resume_employer_text_v20_{teacher_identity}"
     if employer_editor_key not in st.session_state:
         st.session_state[employer_editor_key] = supplemental_default
+
+    render_image_text_import(
+        target_text_key=employer_editor_key,
+        uploader_key=f"resume_employer_images_v244_{teacher_identity}",
+        purpose_label="补充雇主原始需求",
+        multiple=True,
+    )
 
     supplemental_employer_text = st.text_area(
         "完整雇主原文（可选，用于补充标准订单未保留的工作内容）",
@@ -6869,7 +7096,7 @@ elif mode == "④ 根据订单优化老师简历":
 elif mode == "⑤ 新老师录入 → 保存到 Baserow":
     st.markdown('<div class="section-title">新老师录入 → 保存到 Baserow</div>', unsafe_allow_html=True)
     st.caption(
-        "把新老师完整简历粘贴进来，并可上传老师照片。Gemini 只负责把简历解析成当前 Teachers 表已有字段；"
+        "把新老师完整简历粘贴进来，或上传简历截图提取文字，并可上传老师照片。Gemini 只负责把简历解析成当前 Teachers 表已有字段；"
         "你人工确认/修改后，程序才把数据真正写入 Baserow。Original Resume 保存原文，Teacher Photo 保存照片。"
     )
 
@@ -6897,6 +7124,13 @@ elif mode == "⑤ 新老师录入 → 保存到 Baserow":
         st.success("✅ 已检测到 Original Resume 和 Teacher Photo 字段。")
 
     st.markdown("### ① 提供老师原始简历与照片")
+    render_image_text_import(
+        target_text_key="teacher_intake_resume_v22",
+        uploader_key="teacher_resume_images_v244",
+        purpose_label="新老师完整简历",
+        multiple=True,
+    )
+
     intake_resume = st.text_area(
         "老师完整原始简历",
         height=600,
@@ -7096,7 +7330,7 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
         unsafe_allow_html=True,
     )
     st.caption(
-        "微信群、中介、朋友圈、招聘平台等不同格式可以一次粘贴多条。"
+        "微信群、中介、朋友圈、招聘平台等不同格式可以一次粘贴多条，也可以上传多张截图提取文字。"
         "Gemini 第一次负责统一格式；人工确认后保存到 Baserow Orders。"
         "以后直接从订单库读取，不需要重复输入。"
     )
@@ -7166,6 +7400,13 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
         "保存后的订单状态",
         ["招聘中", "面试中", "暂停", "已成交", "已关闭"],
         key="v24_order_save_status",
+    )
+
+    render_image_text_import(
+        target_text_key="v24_order_raw_text",
+        uploader_key="orders_intake_images_v244",
+        purpose_label="招聘信息录入/微信群/中介派单",
+        multiple=True,
     )
 
     raw_orders = st.text_area(
@@ -7238,6 +7479,7 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
                     "v24_order_parsed",
                     "v24_order_source_blocks",
                     "v242_gemini_failed_raw",
+                    "orders_intake_images_v244_last_signature",
                 ]:
                     st.session_state.pop(key, None)
 
@@ -7350,6 +7592,7 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
                     "v24_order_raw_text",
                     "v24_order_parsed",
                     "v24_order_source_blocks",
+                    "orders_intake_images_v244_last_signature",
                 ]
                 for key in keys_to_clear:
                     st.session_state.pop(key, None)
@@ -7603,7 +7846,7 @@ elif mode == "⑦ 订单库 → 时间 / 状态管理":
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.4.3 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Gemini失败待解析兜底、原始招募信息留档、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.4.4 · 电脑/手机自适应（手机端隐藏侧边栏）、截图/图片提取文字、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Gemini失败待解析兜底、原始招募信息留档、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
