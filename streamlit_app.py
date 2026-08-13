@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.4.1
+# AI Teacher Matching System V2.4.2
 # Single-file Streamlit app
 #
 # Goals
@@ -78,7 +78,7 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.4.1",
+    page_title="AI Teacher Matching System V2.4.2",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -88,7 +88,7 @@ st.markdown(
     """
     <style>
       /* ---------------------------------------------------------
-         V2.4.1 responsive layout
+         V2.4.2 responsive layout
          Desktop remains wide; phones automatically become a
          single-column, touch-friendly interface.
          --------------------------------------------------------- */
@@ -1125,7 +1125,7 @@ def save_original_resume_for_teacher(
 
 
 # ============================================================
-# 4B. V2.4.1 BASEROW ORDERS DATABASE
+# 4B. V2.4.2 BASEROW ORDERS DATABASE
 # ============================================================
 
 def baserow_orders_headers() -> Dict[str, str]:
@@ -1446,7 +1446,7 @@ def save_standard_order_to_orders(
     )
     if not payload:
         raise RuntimeError(
-            "Orders 表没有可写入字段。请先按 V2.4.1 字段清单建立 Orders 表。"
+            "Orders 表没有可写入字段。请先按 V2.4.2 字段清单建立 Orders 表。"
         )
     created = orders_create_row(payload)
     return created, warnings
@@ -1667,6 +1667,133 @@ def orders_management_rows(
         })
 
     return result
+
+
+
+
+# ============================================================
+# 4C. V2.4.2 GEMINI FAILURE FALLBACK
+# ============================================================
+
+def build_pending_order_from_raw(raw_text, source_platform):
+    return {
+        "order_info": {
+            "Order ID": None,
+            "Job Type": "待解析",
+            "Working Cities": [],
+            "Job District": None,
+            "Salary Text": None,
+            "Work Schedule": None,
+            "Start Date": None,
+            "Live-in Job": None,
+            "Child Ages": [],
+            "Child Count": None,
+            "Special Needs": [],
+        },
+        "hard_requirements": {},
+        "preferred_requirements": {},
+        "reference_requirements": {},
+        "compound_requirements": [],
+        "manual_review": {
+            "Fallback Status": "Gemini unavailable",
+            "Source Platform": source_platform,
+            "Needs Reparse": True,
+        },
+    }
+
+
+def save_pending_order_to_orders(raw_text, source_platform):
+    pending = build_pending_order_from_raw(raw_text, source_platform)
+    payload, warnings = parsed_order_to_orders_payload(
+        pending,
+        raw_text,
+        source_platform,
+        "待解析",
+    )
+
+    fields = orders_field_map()
+
+    for schema in fields.values():
+        if schema.get("primary") and schema.get("type") in {"text", "long_text"}:
+            primary_name = str(schema.get("name"))
+            if not payload.get(primary_name):
+                payload[primary_name] = "待解析订单"
+
+    if "Original Text" in fields:
+        payload["Original Text"] = str(raw_text or "").strip()
+
+    if "Standard JSON" in fields:
+        payload["Standard JSON"] = json.dumps(
+            pending,
+            ensure_ascii=False,
+            default=str,
+        )
+
+    if "Job Type" in fields:
+        serialized, warning = serialize_orders_value("Job Type", "待解析")
+        if warning:
+            warnings.append(warning)
+        if serialized is not None:
+            payload["Job Type"] = serialized
+
+    if "Status" in fields:
+        serialized, warning = serialize_orders_value("Status", "待解析")
+        if serialized is not None:
+            payload["Status"] = serialized
+        elif warning:
+            warnings.append(
+                "Status 没有「待解析」选项。订单仍会保存；建议在 Baserow Status 中新增「待解析」。"
+            )
+
+    return orders_create_row(payload), warnings
+
+
+def orders_row_needs_reparse(row):
+    if normalize_text(order_status_text(row)) == normalize_text("待解析"):
+        return True
+    if normalize_text(row.get("Job Type")) == normalize_text("待解析"):
+        return True
+
+    raw = row.get("Standard JSON")
+    if raw:
+        try:
+            parsed = raw if isinstance(raw, dict) else json.loads(str(raw))
+            manual = parsed.get("manual_review", {}) if isinstance(parsed, dict) else {}
+            return bool(manual.get("Needs Reparse"))
+        except Exception:
+            pass
+    return False
+
+
+def update_pending_order_after_reparse(row, parsed):
+    row_id = row.get("Baserow Order Row ID")
+    if not row_id:
+        raise RuntimeError("待解析订单缺少 Baserow Row ID。")
+
+    original_text = str(row.get("Original Text") or "").strip()
+    source_platform = str(row.get("Source Platform") or "其他").strip()
+
+    payload, warnings = parsed_order_to_orders_payload(
+        parsed,
+        original_text,
+        source_platform,
+        "招聘中",
+    )
+
+    if "Standard JSON" in orders_field_map():
+        payload["Standard JSON"] = json.dumps(
+            parsed,
+            ensure_ascii=False,
+            default=str,
+        )
+
+    serialized, warning = serialize_orders_value("Status", "招聘中")
+    if warning:
+        warnings.append(warning)
+    if serialized is not None:
+        payload["Status"] = serialized
+
+    return orders_update_row(row_id, payload), warnings
 
 
 
@@ -4394,7 +4521,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.4.1 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.4.2 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -4425,7 +4552,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.4.1 treats ``Original Resume`` as the canonical full-resume field.
+    V2.4.2 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -4745,7 +4872,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.4.1 PDF RESUME EXPORT
+# 8D. V2.4.2 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -5553,7 +5680,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.4.1 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
+    st.caption("V2.4.2 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -5621,7 +5748,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.4.1：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.4.2：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -5731,7 +5858,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.4.1 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.4.2 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -7019,6 +7146,57 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
                 st.success(f"已识别 {len(parsed_orders)} 条标准订单。")
             except Exception as exc:
                 render_api_error(exc)
+                st.warning(
+                    "Gemini 当前未成功返回。可以先保存原始招聘信息为「待解析」，"
+                    "之后在订单库里重新解析。"
+                )
+                st.session_state["v242_gemini_failed_raw"] = raw_orders
+
+    failed_raw = st.session_state.get("v242_gemini_failed_raw", "")
+    if failed_raw:
+        if st.button(
+            "先保存为待解析订单",
+            use_container_width=True,
+            key="v242_save_pending_order",
+        ):
+            try:
+                _created, warnings = save_pending_order_to_orders(
+                    failed_raw,
+                    source_platform,
+                )
+                st.session_state["v241_order_save_success_message"] = (
+                    "✅ 原始招聘信息已保存到 Orders，状态为待解析。"
+                    "以后可以在⑦订单库重新解析。"
+                )
+
+                for key in [
+                    "v24_order_raw_text",
+                    "v24_order_parsed",
+                    "v24_order_source_blocks",
+                    "v242_gemini_failed_raw",
+                ]:
+                    st.session_state.pop(key, None)
+
+                for key in list(st.session_state.keys()):
+                    if key.startswith("v24_order_json_editor_"):
+                        st.session_state.pop(key, None)
+
+                load_orders_from_baserow.clear()
+                load_orders_fields.clear()
+
+                if warnings:
+                    st.session_state["v242_pending_save_warnings"] = warnings
+
+                st.rerun()
+            except Exception as pending_exc:
+                st.error(f"保存待解析订单失败：{pending_exc}")
+
+    if st.session_state.get("v242_pending_save_warnings"):
+        with st.expander("待解析订单保存提示", expanded=True):
+            for warning in dedupe(
+                st.session_state.pop("v242_pending_save_warnings")
+            ):
+                st.warning(warning)
 
     parsed_orders = st.session_state.get("v24_order_parsed", [])
     source_blocks = st.session_state.get("v24_order_source_blocks", [])
@@ -7169,7 +7347,7 @@ elif mode == "⑦ 订单库 → 时间 / 状态管理":
     with f2:
         status_filter = st.selectbox(
             "订单状态",
-            ["全部", "招聘中", "面试中", "暂停", "已成交", "已关闭"],
+            ["全部", "待解析", "招聘中", "面试中", "暂停", "已成交", "已关闭"],
             key="v24_orders_status_filter",
         )
 
@@ -7255,6 +7433,7 @@ elif mode == "⑦ 订单库 → 时间 / 状态管理":
 
                 current_status = order_status_text(row) or "招聘中"
                 status_options = [
+                    "待解析",
                     "招聘中",
                     "面试中",
                     "暂停",
@@ -7299,6 +7478,42 @@ elif mode == "⑦ 订单库 → 时间 / 状态管理":
                     except Exception as exc:
                         render_api_error(exc)
 
+                if orders_row_needs_reparse(row):
+                    st.warning("这条订单还没有完成 AI 标准化。")
+                    if st.button(
+                        "重新调用 Gemini 解析这条订单",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"v242_reparse_{row.get('Baserow Order Row ID')}",
+                    ):
+                        raw_pending = str(row.get("Original Text") or "").strip()
+                        if not raw_pending:
+                            st.error("这条待解析订单没有 Original Text。")
+                        else:
+                            try:
+                                with st.spinner("Gemini 正在重新解析这条订单..."):
+                                    reparsed = parse_employer_order(raw_pending)
+
+                                if isinstance(reparsed, list):
+                                    reparsed = reparsed[0] if reparsed else None
+
+                                if not isinstance(reparsed, dict):
+                                    raise RuntimeError("Gemini 没有返回有效订单 JSON。")
+
+                                _updated, warnings = update_pending_order_after_reparse(
+                                    row,
+                                    reparsed,
+                                )
+
+                                for warning in dedupe(warnings):
+                                    st.warning(warning)
+
+                                st.success("✅ 已重新解析并更新到 Orders。")
+                                load_orders_from_baserow.clear()
+                                st.rerun()
+                            except Exception as reparse_exc:
+                                render_api_error(reparse_exc)
+
                 with st.expander("原始招聘信息"):
                     st.text(row.get("Original Text") or "")
 
@@ -7315,7 +7530,7 @@ elif mode == "⑦ 订单库 → 时间 / 状态管理":
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.4.1 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.4.2 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Gemini失败待解析兜底、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
