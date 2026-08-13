@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.4.4
+# AI Teacher Matching System V2.4.5
 # Single-file Streamlit app
 #
 # Goals
@@ -78,7 +78,7 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.4.4",
+    page_title="AI Teacher Matching System V2.4.5",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -88,7 +88,7 @@ st.markdown(
     """
     <style>
       /* ---------------------------------------------------------
-         V2.4.4 responsive layout
+         V2.4.5 responsive layout
          Desktop remains wide; phones automatically become a
          single-column, touch-friendly interface.
          --------------------------------------------------------- */
@@ -1125,7 +1125,7 @@ def save_original_resume_for_teacher(
 
 
 # ============================================================
-# 4B. V2.4.4 BASEROW ORDERS DATABASE
+# 4B. V2.4.5 BASEROW ORDERS DATABASE
 # ============================================================
 
 def baserow_orders_headers() -> Dict[str, str]:
@@ -1446,7 +1446,7 @@ def save_standard_order_to_orders(
     )
     if not payload:
         raise RuntimeError(
-            "Orders 表没有可写入字段。请先按 V2.4.4 字段清单建立 Orders 表。"
+            "Orders 表没有可写入字段。请先按 V2.4.5 字段清单建立 Orders 表。"
         )
     created = orders_create_row(payload)
     return created, warnings
@@ -1690,7 +1690,7 @@ def orders_management_rows(
 
 
 # ============================================================
-# 4C. V2.4.4 GEMINI FAILURE FALLBACK
+# 4C. V2.4.5 GEMINI FAILURE FALLBACK
 # ============================================================
 
 def build_pending_order_from_raw(raw_text, source_platform):
@@ -1950,104 +1950,186 @@ def generate_content_resilient(
 
 
 # ============================================================
-# 5B. V2.4.4 IMAGE / SCREENSHOT -> EDITABLE TEXT
+# 5B. V2.4.5 LOCAL OCR: IMAGE / SCREENSHOT -> EDITABLE TEXT
 # ============================================================
+
+
+@st.cache_resource(show_spinner=False)
+def local_ocr_engine():
+    """Local Chinese/English OCR. No Gemini/API request is used here."""
+    try:
+        from rapidocr import RapidOCR
+    except Exception as exc:
+        raise RuntimeError(
+            "LOCAL_OCR_NOT_INSTALLED: 本地 OCR 组件没有安装成功。"
+            "请确认 requirements.txt 包含 rapidocr、onnxruntime 和 numpy。"
+        ) from exc
+
+    try:
+        return RapidOCR()
+    except Exception as exc:
+        raise RuntimeError(
+            "LOCAL_OCR_INIT_FAILED: 本地 OCR 初始化失败。"
+            "请在 Streamlit 日志中检查 rapidocr / onnxruntime 安装信息。"
+        ) from exc
 
 
 def _clean_extracted_image_text(value: str) -> str:
     text_value = str(value or "").strip()
-    text_value = re.sub(r"^```(?:text|markdown)?\\s*", "", text_value, flags=re.I)
-    text_value = re.sub(r"\\s*```$", "", text_value)
+    text_value = re.sub(
+        r"^```(?:text|markdown)?\s*",
+        "",
+        text_value,
+        flags=re.I,
+    )
+    text_value = re.sub(r"\s*```$", "", text_value)
     return text_value.strip()
 
 
-def extract_text_from_uploaded_images(
-    uploaded_files: List[Any],
-    purpose_label: str,
-) -> Tuple[str, str]:
-    """Use Gemini multimodal understanding to transcribe screenshots/images."""
-    files = [item for item in (uploaded_files or []) if item is not None]
-    if not files:
-        raise ValueError("请先上传至少一张图片。")
-    if len(files) > 10:
-        raise ValueError("一次最多处理 10 张图片，请分批上传。")
+def _uploaded_image_to_numpy(uploaded: Any):
+    """Convert UploadedFile to RGB numpy array locally."""
+    from io import BytesIO
 
-    client = gemini_client()
-    preferred = str(GEMINI_MODEL or "").strip()
+    import numpy as np
+    from PIL import Image, ImageOps
 
-    prompt = f"""
-你正在做图片文字转录。用途：{purpose_label}。
+    data = uploaded.getvalue()
+    if not data:
+        raise ValueError("图片内容为空。")
 
-任务：
-1. 按图片上传顺序，完整提取所有清晰可见的文字。
-2. 保留原有段落、换行、编号、金额、日期、订单号、城市、人名、电话、符号和中英文。
-3. 不总结，不改写，不纠错，不补充图片中没有的信息。
-4. 多张图片之间用单独一行分隔：===== 截图 N =====
-5. 如果某处看不清，用【看不清】标记，不要猜。
-6. 只返回提取后的文字，不要解释过程，不要返回 JSON，不要加 Markdown 代码块。
-""".strip()
+    try:
+        image = Image.open(BytesIO(data))
+        image = ImageOps.exif_transpose(image)
+        image = image.convert("RGB")
+    except Exception as exc:
+        raise ValueError(
+            f"无法读取图片 {getattr(uploaded, 'name', '未命名图片')}。"
+        ) from exc
 
-    contents: List[Any] = [prompt]
-    for uploaded in files:
-        data = uploaded.getvalue()
-        if not data:
-            continue
-        mime_type = str(getattr(uploaded, "type", "") or "image/jpeg").strip()
-        contents.append(
-            types.Part.from_bytes(
-                data=data,
-                mime_type=mime_type,
+    # Avoid excessive RAM on very tall phone screenshots.
+    max_edge = max(image.size)
+    if max_edge > 3000:
+        ratio = 3000 / float(max_edge)
+        image = image.resize(
+            (
+                max(1, int(image.size[0] * ratio)),
+                max(1, int(image.size[1] * ratio)),
             )
         )
 
-    if len(contents) == 1:
-        raise ValueError("上传的图片没有可读取内容。")
+    return np.asarray(image)
 
-    candidates = [preferred]
-    try:
-        available = list_generate_models(client)
-        alternatives = [
-            model
-            for model in available
-            if "flash" in model.lower() and model != preferred
-        ]
-        if alternatives:
-            candidates.append(alternatives[0])
-    except Exception:
-        pass
 
-    first_error: Optional[Exception] = None
-    attempted: List[str] = []
+def _rapidocr_result_text(result: Any) -> str:
+    if result is None:
+        return ""
 
-    for model_name in dedupe(candidates):
-        if not model_name:
+    txts = getattr(result, "txts", None)
+    scores = getattr(result, "scores", None)
+
+    if not txts:
+        return ""
+
+    lines: List[str] = []
+
+    for index, raw_text in enumerate(txts):
+        line = str(raw_text or "").strip()
+        if not line:
             continue
-        attempted.append(model_name)
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-            )
-            result = _clean_extracted_image_text(
-                getattr(response, "text", "")
-            )
-            if not result:
-                raise RuntimeError("Gemini 没有返回可用的图片文字。")
-            return result, model_name
-        except Exception as exc:
-            if first_error is None:
-                first_error = exc
-            if not (
-                is_gemini_not_found_error(exc)
-                or is_transient_gemini_error(exc)
-            ):
-                raise
 
-    raise RuntimeError(
-        "GEMINI_IMAGE_TEXT_UNAVAILABLE: 图片文字提取暂时失败。"
-        f"已尝试模型：{', '.join(attempted) or preferred}。"
-        "原输入内容不会丢失，可以稍后重试。"
-    ) from first_error
+        score = None
+        try:
+            if scores is not None and index < len(scores):
+                score = float(scores[index])
+        except Exception:
+            score = None
+
+        # Keep uncertain text instead of silently deleting it.
+        if score is not None and score < 0.35:
+            line = f"{line}【低置信度】"
+
+        lines.append(line)
+
+    return "\n".join(lines).strip()
+
+
+def extract_text_from_uploaded_images_local(
+    uploaded_files: List[Any],
+    purpose_label: str,
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Process screenshots one by one using local OCR.
+    One failed image does not invalidate the successful images.
+    """
+    files = [
+        item
+        for item in (uploaded_files or [])
+        if item is not None
+    ]
+
+    if not files:
+        raise ValueError("请先上传至少一张图片。")
+
+    if len(files) > 20:
+        raise ValueError("一次最多处理 20 张图片，请分批上传。")
+
+    engine = local_ocr_engine()
+
+    successful_blocks: List[str] = []
+    failed_files: List[str] = []
+    empty_files: List[str] = []
+
+    for index, uploaded in enumerate(files, start=1):
+        file_name = str(
+            getattr(uploaded, "name", "")
+            or f"截图_{index}"
+        )
+
+        try:
+            np_image = _uploaded_image_to_numpy(uploaded)
+
+            result = engine(
+                np_image,
+                use_det=True,
+                use_cls=False,
+                use_rec=True,
+            )
+
+            extracted = _rapidocr_result_text(result)
+
+            if not extracted:
+                empty_files.append(file_name)
+                continue
+
+            successful_blocks.append(
+                f"===== 截图 {index}：{file_name} =====\n{extracted}"
+            )
+
+        except Exception:
+            failed_files.append(file_name)
+
+    combined = "\n\n".join(successful_blocks).strip()
+
+    if not combined:
+        parts: List[str] = []
+        if failed_files:
+            parts.append("处理失败：" + "、".join(failed_files))
+        if empty_files:
+            parts.append("未识别到文字：" + "、".join(empty_files))
+        raise RuntimeError(
+            "LOCAL_OCR_NO_TEXT: 本地 OCR 没有提取到可用文字。"
+            + ("；".join(parts) if parts else "")
+        )
+
+    return combined, {
+        "engine": "RapidOCR / ONNX Runtime",
+        "purpose": purpose_label,
+        "total": len(files),
+        "success": len(successful_blocks),
+        "failed_files": failed_files,
+        "empty_files": empty_files,
+        "uses_gemini": False,
+    }
 
 
 def render_image_text_import(
@@ -2056,17 +2138,22 @@ def render_image_text_import(
     purpose_label: str,
     multiple: bool = True,
 ) -> None:
-    """Render screenshot upload + extraction before a text_area widget."""
-    st.caption("也可以上传截图/图片，AI 会把图片文字提取到下面的可编辑输入框。")
+    """Screenshot upload + LOCAL OCR. Gemini is intentionally not used."""
+    st.caption(
+        "📷 也可以上传截图/图片。"
+        "这一步使用本地 OCR 提取文字，不调用 Gemini；"
+        "识别结果会加入下面的可编辑输入框。"
+    )
 
     uploaded = st.file_uploader(
-        "📷 上传截图 / 图片提取文字",
+        "上传截图 / 本地提取文字",
         type=["jpg", "jpeg", "png", "webp"],
         accept_multiple_files=multiple,
         key=uploader_key,
         help=(
             "支持微信截图、招聘信息截图、老师简历截图等。"
-            "提取后仍可在文字框中人工修改。"
+            "本地 OCR 完成后仍可人工修改；"
+            "只有后续点击 AI 标准化/解析时才需要 Gemini。"
         ),
     )
 
@@ -2079,14 +2166,15 @@ def render_image_text_import(
 
     if files:
         st.caption(
-            "已选择：" + "、".join(str(item.name) for item in files)
+            "已选择："
+            + "、".join(str(item.name) for item in files)
         )
 
     button_key = f"{uploader_key}_extract_button"
     signature_key = f"{uploader_key}_last_signature"
 
     if st.button(
-        "从图片提取文字并加入输入框",
+        "从图片本地提取文字并加入输入框",
         use_container_width=True,
         key=button_key,
         disabled=not bool(files),
@@ -2100,32 +2188,83 @@ def render_image_text_import(
         )
 
         if st.session_state.get(signature_key) == signature:
-            st.info("这组图片已经提取过。更换图片后可再次提取，避免重复追加文字。")
+            st.info(
+                "这组图片已经提取过。"
+                "更换图片后可再次提取，避免重复追加文字。"
+            )
         else:
             try:
-                with st.spinner("Gemini 正在读取图片文字..."):
-                    extracted, model_used = extract_text_from_uploaded_images(
-                        files,
-                        purpose_label,
+                with st.spinner(
+                    "正在本地识别图片文字，不调用 Gemini..."
+                ):
+                    extracted, meta = (
+                        extract_text_from_uploaded_images_local(
+                            files,
+                            purpose_label,
+                        )
                     )
 
                 existing = str(
-                    st.session_state.get(target_text_key, "") or ""
+                    st.session_state.get(target_text_key, "")
+                    or ""
                 ).strip()
+
                 combined = (
-                    f"{existing}\\n\\n{extracted}".strip()
+                    f"{existing}\n\n{extracted}".strip()
                     if existing
                     else extracted
                 )
+
                 st.session_state[target_text_key] = combined
                 st.session_state[signature_key] = signature
+
                 st.success(
-                    f"✅ 已从 {len(files)} 张图片提取文字并加入输入框。"
-                    f"模型：{model_used}。"
+                    "✅ 本地 OCR 完成："
+                    f"{meta['success']}/{meta['total']} 张图片已提取。"
+                    "本步骤 Gemini 请求：0 次。"
                 )
+
+                if meta["failed_files"] or meta["empty_files"]:
+                    with st.expander(
+                        "查看本地 OCR 提示",
+                        expanded=True,
+                    ):
+                        if meta["failed_files"]:
+                            st.warning(
+                                "处理失败："
+                                + "、".join(meta["failed_files"])
+                            )
+                        if meta["empty_files"]:
+                            st.warning(
+                                "没有识别到文字："
+                                + "、".join(meta["empty_files"])
+                            )
+
                 st.rerun()
+
             except Exception as exc:
-                render_api_error(exc)
+                error_text = str(exc)
+
+                if (
+                    "LOCAL_OCR_NOT_INSTALLED" in error_text
+                    or "LOCAL_OCR_INIT_FAILED" in error_text
+                ):
+                    st.error(
+                        "本地 OCR 组件暂时不可用。"
+                        "这一步没有调用 Gemini。"
+                    )
+                    st.info(
+                        "请确认 requirements.txt 已加入 "
+                        "rapidocr、onnxruntime、numpy，"
+                        "然后重新部署 Streamlit。"
+                    )
+                else:
+                    st.error(
+                        "本地 OCR 没有成功提取这组图片。"
+                        "可以换更清晰的截图，或直接复制文字到输入框。"
+                    )
+                    st.caption(error_text[:800])
+
 
 
 def build_parser_prompt(employer_request: str) -> str:
@@ -4756,7 +4895,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.4.4 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.4.5 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -4787,7 +4926,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.4.4 treats ``Original Resume`` as the canonical full-resume field.
+    V2.4.5 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -5107,7 +5246,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.4.4 PDF RESUME EXPORT
+# 8D. V2.4.5 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -5915,7 +6054,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.4.4 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
+    st.caption("V2.4.5 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -5983,7 +6122,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.4.4：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.4.5：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -6103,7 +6242,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.4.4 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.4.5 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -7846,7 +7985,7 @@ elif mode == "⑦ 订单库 → 时间 / 状态管理":
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.4.4 · 电脑/手机自适应（手机端隐藏侧边栏）、截图/图片提取文字、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Gemini失败待解析兜底、原始招募信息留档、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.4.5 · 电脑/手机自适应（手机端隐藏侧边栏）、截图/图片提取文字、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Gemini失败待解析兜底、原始招募信息留档、本地OCR截图识别、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
