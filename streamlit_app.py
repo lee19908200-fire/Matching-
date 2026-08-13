@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.4.5
+# AI Teacher Matching System V2.4.5 - OCR Debug Build
 # Single-file Streamlit app
 #
 # Goals
@@ -1956,22 +1956,14 @@ def generate_content_resilient(
 
 @st.cache_resource(show_spinner=False)
 def local_ocr_engine():
-    """Local Chinese/English OCR. No Gemini/API request is used here."""
-    try:
-        from rapidocr import RapidOCR
-    except Exception as exc:
-        raise RuntimeError(
-            "LOCAL_OCR_NOT_INSTALLED: 本地 OCR 组件没有安装成功。"
-            "请确认 requirements.txt 包含 rapidocr、onnxruntime 和 numpy。"
-        ) from exc
+    """Local Chinese/English OCR. No Gemini/API request is used here.
 
-    try:
-        return RapidOCR()
-    except Exception as exc:
-        raise RuntimeError(
-            "LOCAL_OCR_INIT_FAILED: 本地 OCR 初始化失败。"
-            "请在 Streamlit 日志中检查 rapidocr / onnxruntime 安装信息。"
-        ) from exc
+    调试版：故意不包装 RapidOCR 的导入/初始化异常，
+    让 Streamlit 页面直接显示真实错误原因。
+    """
+    from rapidocr import RapidOCR
+
+    return RapidOCR()
 
 
 def _clean_extracted_image_text(value: str) -> str:
@@ -2078,6 +2070,7 @@ def extract_text_from_uploaded_images_local(
     successful_blocks: List[str] = []
     failed_files: List[str] = []
     empty_files: List[str] = []
+    file_errors: List[str] = []
 
     for index, uploaded in enumerate(files, start=1):
         file_name = str(
@@ -2105,8 +2098,11 @@ def extract_text_from_uploaded_images_local(
                 f"===== 截图 {index}：{file_name} =====\n{extracted}"
             )
 
-        except Exception:
+        except Exception as exc:
             failed_files.append(file_name)
+            file_errors.append(
+                f"{file_name}: {type(exc).__name__}: {exc}"
+            )
 
     combined = "\n\n".join(successful_blocks).strip()
 
@@ -2116,9 +2112,12 @@ def extract_text_from_uploaded_images_local(
             parts.append("处理失败：" + "、".join(failed_files))
         if empty_files:
             parts.append("未识别到文字：" + "、".join(empty_files))
+        detail = "；".join(parts) if parts else ""
+        if file_errors:
+            detail += ("；" if detail else "") + " | ".join(file_errors[:5])
         raise RuntimeError(
             "LOCAL_OCR_NO_TEXT: 本地 OCR 没有提取到可用文字。"
-            + ("；".join(parts) if parts else "")
+            + detail
         )
 
     return combined, {
@@ -2128,6 +2127,7 @@ def extract_text_from_uploaded_images_local(
         "success": len(successful_blocks),
         "failed_files": failed_files,
         "empty_files": empty_files,
+        "file_errors": file_errors,
         "uses_gemini": False,
     }
 
@@ -2239,31 +2239,23 @@ def render_image_text_import(
                                 "没有识别到文字："
                                 + "、".join(meta["empty_files"])
                             )
+                        if meta.get("file_errors"):
+                            st.code(
+                                "\n".join(meta["file_errors"][:10]),
+                                language="text",
+                            )
 
                 st.rerun()
 
             except Exception as exc:
-                error_text = str(exc)
-
-                if (
-                    "LOCAL_OCR_NOT_INSTALLED" in error_text
-                    or "LOCAL_OCR_INIT_FAILED" in error_text
-                ):
-                    st.error(
-                        "本地 OCR 组件暂时不可用。"
-                        "这一步没有调用 Gemini。"
-                    )
-                    st.info(
-                        "请确认 requirements.txt 已加入 "
-                        "rapidocr、onnxruntime、numpy，"
-                        "然后重新部署 Streamlit。"
-                    )
-                else:
-                    st.error(
-                        "本地 OCR 没有成功提取这组图片。"
-                        "可以换更清晰的截图，或直接复制文字到输入框。"
-                    )
-                    st.caption(error_text[:800])
+                st.error(
+                    "本地 OCR 发生错误。这一步没有调用 Gemini。"
+                )
+                st.code(
+                    f"{type(exc).__name__}: {exc}",
+                    language="text",
+                )
+                st.exception(exc)
 
 
 
