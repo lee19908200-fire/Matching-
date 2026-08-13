@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.4.2
+# AI Teacher Matching System V2.4.3
 # Single-file Streamlit app
 #
 # Goals
@@ -78,7 +78,7 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.4.2",
+    page_title="AI Teacher Matching System V2.4.3",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -88,7 +88,7 @@ st.markdown(
     """
     <style>
       /* ---------------------------------------------------------
-         V2.4.2 responsive layout
+         V2.4.3 responsive layout
          Desktop remains wide; phones automatically become a
          single-column, touch-friendly interface.
          --------------------------------------------------------- */
@@ -1125,7 +1125,7 @@ def save_original_resume_for_teacher(
 
 
 # ============================================================
-# 4B. V2.4.2 BASEROW ORDERS DATABASE
+# 4B. V2.4.3 BASEROW ORDERS DATABASE
 # ============================================================
 
 def baserow_orders_headers() -> Dict[str, str]:
@@ -1446,7 +1446,7 @@ def save_standard_order_to_orders(
     )
     if not payload:
         raise RuntimeError(
-            "Orders 表没有可写入字段。请先按 V2.4.2 字段清单建立 Orders 表。"
+            "Orders 表没有可写入字段。请先按 V2.4.3 字段清单建立 Orders 表。"
         )
     created = orders_create_row(payload)
     return created, warnings
@@ -1534,9 +1534,20 @@ def parsed_from_orders_row(
             info = parsed["order_info"]
             if not info.get("Order ID"):
                 info["Order ID"] = row.get("Order ID")
+
+            original_text = str(
+                row.get("Original Text")
+                or parsed.get("original_request")
+                or parsed.get("source_excerpt")
+                or ""
+            ).strip()
+            if original_text:
+                parsed["_original_text"] = original_text
+                parsed["original_request"] = original_text
+
             return parsed
 
-    return {
+    fallback = {
         "order_info": {
             "Order ID": row.get("Order ID"),
             "Job Type": row.get("Job Type"),
@@ -1552,6 +1563,13 @@ def parsed_from_orders_row(
         "compound_requirements": [],
         "manual_review": {},
     }
+
+    original_text = str(row.get("Original Text") or "").strip()
+    if original_text:
+        fallback["_original_text"] = original_text
+        fallback["original_request"] = original_text
+
+    return fallback
 
 
 def filter_orders_rows(
@@ -1672,7 +1690,7 @@ def orders_management_rows(
 
 
 # ============================================================
-# 4C. V2.4.2 GEMINI FAILURE FALLBACK
+# 4C. V2.4.3 GEMINI FAILURE FALLBACK
 # ============================================================
 
 def build_pending_order_from_raw(raw_text, source_platform):
@@ -4334,6 +4352,41 @@ def render_compact_candidate(rank: int, item: Dict[str, Any]) -> None:
             st.write("✅ **已匹配：**", compact_field_names(item["hard"][MATCH]))
 
 
+def parsed_original_text(parsed: Dict[str, Any]) -> str:
+    if not isinstance(parsed, dict):
+        return ""
+
+    orders_row = parsed.get("_orders_row")
+    row_original = ""
+    if isinstance(orders_row, dict):
+        row_original = str(
+            orders_row.get("Original Text") or ""
+        ).strip()
+
+    return str(
+        parsed.get("_original_text")
+        or row_original
+        or parsed.get("original_request")
+        or parsed.get("source_excerpt")
+        or ""
+    ).strip()
+
+
+def render_original_order_text(
+    parsed: Dict[str, Any],
+    expanded: bool = False,
+) -> None:
+    original_text = parsed_original_text(parsed)
+    if not original_text:
+        return
+
+    with st.expander(
+        "查看原始招募信息",
+        expanded=expanded,
+    ):
+        st.text(original_text)
+
+
 def render_parsed_order_compact(parsed: Dict[str, Any]) -> None:
     left, right = st.columns([1, 2])
     with left:
@@ -4356,6 +4409,8 @@ def render_parsed_order_compact(parsed: Dict[str, Any]) -> None:
         st.warning("以下内容只供人工复核，不参与自动匹配：")
         for key, value in manual.items():
             st.write(f"**{key}：** {requirement_value(value)}")
+
+    render_original_order_text(parsed)
 
 
 def render_batch_card_summary(
@@ -4521,7 +4576,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.4.2 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.4.3 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -4552,7 +4607,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.4.2 treats ``Original Resume`` as the canonical full-resume field.
+    V2.4.3 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -4872,7 +4927,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.4.2 PDF RESUME EXPORT
+# 8D. V2.4.3 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -5680,7 +5735,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.4.2 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
+    st.caption("V2.4.3 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -5748,7 +5803,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.4.2：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.4.3：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -5819,8 +5874,6 @@ if mode == "① 单个订单 → 匹配全部老师":
     if single_parsed:
         st.divider()
         st.markdown("### AI 解析后的订单")
-        with st.expander("查看原始订单"):
-            st.write(single_parsed["original_request"])
         render_parsed_order_compact(single_parsed)
         if single_parsed.get("warnings"):
             with st.expander("解析提示"):
@@ -5858,7 +5911,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.4.2 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.4.3 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -5916,6 +5969,14 @@ elif mode == "② 批量订单 → 每单推荐老师":
 
     if "batch_standard_editor" in st.session_state:
         st.divider()
+
+        if batch_raw_text.strip():
+            with st.expander(
+                "查看本批原始招募信息",
+                expanded=False,
+            ):
+                st.text(batch_raw_text)
+
         st.markdown("### 第二步：检查 AI 统一后的标准订单")
         st.info(
             "下面已经是系统的固定格式。你可以直接修改字段，但请保留每条订单外面的 "
@@ -6466,6 +6527,9 @@ elif mode == "④ 根据订单优化老师简历":
 
     if parsed_target:
         st.markdown("### 目标订单确认")
+        st.caption(
+            "如果该订单来自 Orders，下方可直接展开查看当时保存的完整原始招募信息。"
+        )
         with st.expander(order_title(parsed_target, 1), expanded=False):
             render_parsed_order_compact(parsed_target)
             manual = parsed_target.get("manual_review", {})
@@ -7514,8 +7578,17 @@ elif mode == "⑦ 订单库 → 时间 / 状态管理":
                             except Exception as reparse_exc:
                                 render_api_error(reparse_exc)
 
-                with st.expander("原始招聘信息"):
-                    st.text(row.get("Original Text") or "")
+                with st.expander("查看原始招募信息"):
+                    st.text_area(
+                        "Original Text",
+                        value=str(row.get("Original Text") or ""),
+                        height=260,
+                        disabled=True,
+                        key=(
+                            "v243_original_text_"
+                            f"{row.get('Baserow Order Row ID')}"
+                        ),
+                    )
 
                 with st.expander("标准订单 JSON"):
                     st.json(parsed, expanded=False)
@@ -7530,7 +7603,7 @@ elif mode == "⑦ 订单库 → 时间 / 状态管理":
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.4.2 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Gemini失败待解析兜底、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.4.3 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Gemini失败待解析兜底、原始招募信息留档、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
