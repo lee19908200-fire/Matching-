@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.4
+# AI Teacher Matching System V2.4.1
 # Single-file Streamlit app
 #
 # Goals
@@ -78,7 +78,7 @@ except Exception as _pdf_import_error:
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Teacher Matching System V2.4",
+    page_title="AI Teacher Matching System V2.4.1",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -88,7 +88,7 @@ st.markdown(
     """
     <style>
       /* ---------------------------------------------------------
-         V2.4 responsive layout
+         V2.4.1 responsive layout
          Desktop remains wide; phones automatically become a
          single-column, touch-friendly interface.
          --------------------------------------------------------- */
@@ -1125,7 +1125,7 @@ def save_original_resume_for_teacher(
 
 
 # ============================================================
-# 4B. V2.4 BASEROW ORDERS DATABASE
+# 4B. V2.4.1 BASEROW ORDERS DATABASE
 # ============================================================
 
 def baserow_orders_headers() -> Dict[str, str]:
@@ -1446,7 +1446,7 @@ def save_standard_order_to_orders(
     )
     if not payload:
         raise RuntimeError(
-            "Orders 表没有可写入字段。请先按 V2.4 字段清单建立 Orders 表。"
+            "Orders 表没有可写入字段。请先按 V2.4.1 字段清单建立 Orders 表。"
         )
     created = orders_create_row(payload)
     return created, warnings
@@ -4394,7 +4394,7 @@ def render_api_error(exc: Exception) -> None:
 
 
 # ============================================================
-# 8C. V2.4 JOB-TARGETED RESUME OPTIMIZER
+# 8C. V2.4.1 JOB-TARGETED RESUME OPTIMIZER
 # ============================================================
 
 
@@ -4425,7 +4425,7 @@ def teacher_job_relevant_profile(teacher: Dict[str, Any]) -> Dict[str, Any]:
 def teacher_resume_source(teacher: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Return the best available original resume text and its Baserow source field.
 
-    V2.4 treats ``Original Resume`` as the canonical full-resume field.
+    V2.4.1 treats ``Original Resume`` as the canonical full-resume field.
     Older/fallback field names are still supported so existing databases continue
     to work.  The function never fabricates missing resume text.
     """
@@ -4745,7 +4745,7 @@ def resume_download_text(result: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 8D. V2.4 PDF RESUME EXPORT
+# 8D. V2.4.1 PDF RESUME EXPORT
 # ============================================================
 
 
@@ -5553,7 +5553,7 @@ except Exception as exc:
 
 with st.sidebar:
     st.title("🎓 Teacher Matching")
-    st.caption("V2.4 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
+    st.caption("V2.4.1 · 电脑 / 手机自适应 · 匹配 / 简历 / 入库")
     st.divider()
     st.markdown("### 系统状态")
 
@@ -5621,7 +5621,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.4：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.4.1：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -5731,7 +5731,7 @@ if mode == "① 单个订单 → 匹配全部老师":
 elif mode == "② 批量订单 → 每单推荐老师":
     st.markdown('<div class="section-title">批量订单匹配</div>', unsafe_allow_html=True)
     st.caption(
-        "V2.4 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
+        "V2.4.1 批量匹配继续使用两阶段流程：先让 Gemini 把不同平台、不同排版的原始派单统一成标准订单格式，并识别 OR/AND 组合条件；"
         "你确认/修改以后，再由 Python 本地读取标准订单并匹配全部老师。像“5年教培或3年儿陪”会保留为一个 OR 组合条件；“开车接送”只计驾驶，不再重复计一次接送硬条件。"
     )
 
@@ -6910,6 +6910,11 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
         "以后直接从订单库读取，不需要重复输入。"
     )
 
+    if st.session_state.get("v241_order_save_success_message"):
+        st.success(
+            st.session_state.pop("v241_order_save_success_message")
+        )
+
     if ORDERS_TABLE_ID is None:
         st.error(
             "尚未配置 ORDERS_TABLE_ID。请先在 Baserow 建立 Orders 表，"
@@ -7094,11 +7099,26 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
                     st.error(f"订单 {order_id} 保存失败：{exc}")
 
             if success_count:
-                st.success(f"✅ 已保存 {success_count} 条订单到 Orders。")
-                st.info(
-                    "以后可以在「⑦ 订单库」按最近7/14/21/30天查看，"
-                    "不需要再次输入这些招聘信息。"
+                st.session_state["v241_order_save_success_message"] = (
+                    f"✅ 已保存 {success_count} 条订单到 Orders。"
+                    "本批输入已自动清空，可以直接粘贴下一批招聘信息。"
                 )
+
+                keys_to_clear = [
+                    "v24_order_raw_text",
+                    "v24_order_parsed",
+                    "v24_order_source_blocks",
+                ]
+                for key in keys_to_clear:
+                    st.session_state.pop(key, None)
+
+                for key in list(st.session_state.keys()):
+                    if key.startswith("v24_order_json_editor_"):
+                        st.session_state.pop(key, None)
+
+                load_orders_from_baserow.clear()
+                load_orders_fields.clear()
+                st.rerun()
 
             if all_warnings:
                 with st.expander("保存提示"):
@@ -7295,9 +7315,7 @@ elif mode == "⑦ 订单库 → 时间 / 状态管理":
 
 st.divider()
 st.caption(
-    "Teacher Matching System V2.4 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
+    "Teacher Matching System V2.4.1 · 电脑/手机自适应（手机端隐藏侧边栏）、AI统一订单格式、老师匹配、老师自动入库、招聘订单入库、Orders时间/状态管理、照片管理、完整/精简岗位定制简历、PDF导出与事实校验。"
     "自动评分只使用岗位相关资格、能力、工作条件和明确的 OR/AND 组合条件；"
     "岗位定制简历只重组有来源证据的真实经历，个人属性要求不用于自动匹配或简历优化。"
 )
-
-
