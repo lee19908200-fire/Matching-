@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.4.5 - OCR Debug Build
+# AI Teacher Matching System V2.4.6
 # Single-file Streamlit app
 #
 # Goals
@@ -1956,14 +1956,22 @@ def generate_content_resilient(
 
 @st.cache_resource(show_spinner=False)
 def local_ocr_engine():
-    """Local Chinese/English OCR. No Gemini/API request is used here.
+    """Local Chinese/English OCR. No Gemini/API request is used here."""
+    try:
+        from rapidocr import RapidOCR
+    except Exception as exc:
+        raise RuntimeError(
+            "LOCAL_OCR_NOT_INSTALLED: 本地 OCR 组件没有安装成功。"
+            "请确认 requirements.txt 包含 rapidocr、onnxruntime 和 numpy。"
+        ) from exc
 
-    调试版：故意不包装 RapidOCR 的导入/初始化异常，
-    让 Streamlit 页面直接显示真实错误原因。
-    """
-    from rapidocr import RapidOCR
-
-    return RapidOCR()
+    try:
+        return RapidOCR()
+    except Exception as exc:
+        raise RuntimeError(
+            "LOCAL_OCR_INIT_FAILED: 本地 OCR 初始化失败。"
+            "请在 Streamlit 日志中检查 rapidocr / onnxruntime 安装信息。"
+        ) from exc
 
 
 def _clean_extracted_image_text(value: str) -> str:
@@ -2070,7 +2078,6 @@ def extract_text_from_uploaded_images_local(
     successful_blocks: List[str] = []
     failed_files: List[str] = []
     empty_files: List[str] = []
-    file_errors: List[str] = []
 
     for index, uploaded in enumerate(files, start=1):
         file_name = str(
@@ -2098,11 +2105,8 @@ def extract_text_from_uploaded_images_local(
                 f"===== 截图 {index}：{file_name} =====\n{extracted}"
             )
 
-        except Exception as exc:
+        except Exception:
             failed_files.append(file_name)
-            file_errors.append(
-                f"{file_name}: {type(exc).__name__}: {exc}"
-            )
 
     combined = "\n\n".join(successful_blocks).strip()
 
@@ -2112,12 +2116,9 @@ def extract_text_from_uploaded_images_local(
             parts.append("处理失败：" + "、".join(failed_files))
         if empty_files:
             parts.append("未识别到文字：" + "、".join(empty_files))
-        detail = "；".join(parts) if parts else ""
-        if file_errors:
-            detail += ("；" if detail else "") + " | ".join(file_errors[:5])
         raise RuntimeError(
             "LOCAL_OCR_NO_TEXT: 本地 OCR 没有提取到可用文字。"
-            + detail
+            + ("；".join(parts) if parts else "")
         )
 
     return combined, {
@@ -2127,7 +2128,6 @@ def extract_text_from_uploaded_images_local(
         "success": len(successful_blocks),
         "failed_files": failed_files,
         "empty_files": empty_files,
-        "file_errors": file_errors,
         "uses_gemini": False,
     }
 
@@ -2239,23 +2239,31 @@ def render_image_text_import(
                                 "没有识别到文字："
                                 + "、".join(meta["empty_files"])
                             )
-                        if meta.get("file_errors"):
-                            st.code(
-                                "\n".join(meta["file_errors"][:10]),
-                                language="text",
-                            )
 
                 st.rerun()
 
             except Exception as exc:
-                st.error(
-                    "本地 OCR 发生错误。这一步没有调用 Gemini。"
-                )
-                st.code(
-                    f"{type(exc).__name__}: {exc}",
-                    language="text",
-                )
-                st.exception(exc)
+                error_text = str(exc)
+
+                if (
+                    "LOCAL_OCR_NOT_INSTALLED" in error_text
+                    or "LOCAL_OCR_INIT_FAILED" in error_text
+                ):
+                    st.error(
+                        "本地 OCR 组件暂时不可用。"
+                        "这一步没有调用 Gemini。"
+                    )
+                    st.info(
+                        "请确认 requirements.txt 已加入 "
+                        "rapidocr、onnxruntime、numpy，"
+                        "然后重新部署 Streamlit。"
+                    )
+                else:
+                    st.error(
+                        "本地 OCR 没有成功提取这组图片。"
+                        "可以换更清晰的截图，或直接复制文字到输入框。"
+                    )
+                    st.caption(error_text[:800])
 
 
 
@@ -6114,7 +6122,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.4.5：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.4.6：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -7568,7 +7576,7 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
                 st.session_state.pop(key, None)
         st.rerun()
 
-       if parse_orders_button:
+    if parse_orders_button:
         if not raw_orders.strip():
             st.warning("请先粘贴或上传招聘信息。")
         else:
@@ -7580,6 +7588,8 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
                         raw_orders
                     )
 
+                # 语义拆单后的每条来源文本。当前标准化器返回 source_excerpt，
+                # 后续保存时会分别写入每条 Orders 的 Original Text。
                 source_blocks = [
                     str(
                         parsed.get("source_excerpt")
@@ -7592,6 +7602,7 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
                 st.session_state["v24_order_parsed"] = parsed_orders
                 st.session_state["v24_order_source_blocks"] = source_blocks
                 st.session_state["v24_order_model_used"] = model_used
+                st.session_state.pop("v242_gemini_failed_raw", None)
 
                 st.success(
                     f"✅ 已识别 {len(parsed_orders)} 条独立标准订单。"
