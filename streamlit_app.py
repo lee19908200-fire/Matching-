@@ -7568,7 +7568,7 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
                 st.session_state.pop(key, None)
         st.rerun()
 
-    if parse_orders_button:
+   if parse_orders_button:
     if not raw_orders.strip():
         st.warning("请先粘贴或上传招聘信息。")
     else:
