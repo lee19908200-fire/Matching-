@@ -1,5 +1,5 @@
 # ============================================================
-# AI Teacher Matching System V2.4.6
+# AI Teacher Matching System V2.4.7
 # Single-file Streamlit app
 #
 # Goals
@@ -2272,7 +2272,15 @@ def build_parser_prompt(employer_request: str) -> str:
 You parse ONE private-family recruitment order into structured JSON.
 Return JSON only. Do not include markdown.
 
-IMPORTANT EMPLOYMENT-SAFETY RULE:
+IMPORTANT SOURCE-TEXT PRESERVATION RULES:
+- Every returned order MUST contain source_text.
+- source_text must preserve the COMPLETE original recruitment text for that ONE order, including ID, city, salary, schedule, duties, requirements and notes when present.
+- Do not summarize source_text.
+- Do not combine two jobs inside one source_text.
+- Do not copy chat UI noise into source_text unless it is part of the recruitment message.
+- source_excerpt may be short, but source_text must be the full per-order original text.
+
+EMPLOYMENT-SAFETY RULE:
 Candidate age, gender, nationality/hometown/regional exclusions, appearance, height/weight,
 and personality/style preferences must NEVER be placed in hard_requirements or preferred_requirements.
 Preserve them only under manual_review for a human recruiter. They must not affect automated ranking.
@@ -4162,8 +4170,12 @@ ORDER-BOUNDARY RULES:
 - Different order IDs usually mean different orders.
 - A fresh combination of salary + city/location + job type + duties/requirements usually starts a new order.
 - If the text clearly changes to another family, child, city, salary, job type, or work schedule, start a new order.
-- A single order may legitimately contain multiple sequential/alternative cities, e.g. "长沙/新加坡". Keep those cities together ONLY when the source clearly says the same family/job works across those locations.
-- Do not combine two separate families just because they are pasted on the same line.
+- IMPORTANT: after one order already contains enough information to stand on its own, a NEW line that starts with another city/location plus another job title is a NEW order even when there is no new order ID.
+- IMPORTANT: a new standalone recruiter-style headline such as "福建厦门 住家女老师", "成都 白班陪伴老师", "重庆 高端育婴师", "昆山 钟点家教" starts a NEW order when it follows a complete previous order.
+- IMPORTANT: never attach a second city's job description, salary, candidate requirements, or child information to the previous order merely because the source has no separator.
+- Example: if one order ends with "【工作要求】本科以上...属龙不行" and the next lines begin "福建厦门 住家女老师 / 陪伴公立初一男生...", those MUST be TWO orders.
+- A single order may legitimately contain multiple sequential/alternative cities, e.g. "长沙/新加坡". Keep those cities together ONLY when the source explicitly states that the SAME family/job works across those locations.
+- Do not combine two separate families just because they are pasted on the same line or screenshot.
 - If an order has no ID, create no fake ID; keep Order ID as null.
 - Do not invent missing information. Use null, [], or omit the requirement when not stated.
 
@@ -4177,6 +4189,7 @@ RETURN EXACTLY:
   "orders": [
     {{
       "source_excerpt": "a short excerpt that lets a human recognize this source order",
+      "source_text": "COMPLETE original source text belonging ONLY to this one order. Copy all relevant original lines for this order; do not summarize; do not include any line from the next/previous order.",
       "order_info": {{
         "Order ID": null,
         "Job Type": null,
@@ -4345,8 +4358,6 @@ def normalize_raw_orders_with_gemini(raw_text: str) -> Tuple[List[Dict[str, Any]
     if not request_text:
         raise ValueError("请先粘贴雇主原始订单。")
 
-    # One AI request handles the entire normalization stage.  Keep a practical
-    # input guard so Community Cloud / free-tier output is less likely to truncate.
     if len(request_text) > 50000:
         raise ValueError("本次原始订单文字过长。建议分成两批，每批不超过约 5 万字符。")
 
@@ -4360,21 +4371,69 @@ def normalize_raw_orders_with_gemini(raw_text: str) -> Tuple[List[Dict[str, Any]
         raise RuntimeError("Gemini 一次识别出超过 60 条订单。为避免异常合并，请分批处理。")
 
     parsed_orders: List[Dict[str, Any]] = []
+
     for index, raw in enumerate(raw_orders, start=1):
         if not isinstance(raw, dict):
             raise RuntimeError(f"第 {index} 条标准化结果不是 JSON object。")
 
-        # Do not source-ground against the entire mixed source text.  The whole
-        # purpose of V1.7 is to make the AI-normalized order the authoritative
-        # boundary, then let a human review/edit it before matching.
+        source_text = str(
+            raw.get("source_text")
+            or raw.get("source_excerpt")
+            or ""
+        ).strip()
+
+        # Second safety net:
+        # Gemini sometimes still merges two recruiter messages into one order.
+        # If the per-order source text itself can be deterministically split into
+        # multiple complete-looking blocks, re-parse only that suspicious block.
+        # This adds extra Gemini work ONLY for a likely merged result.
+        candidate_blocks = split_batch_orders(source_text) if source_text else []
+
+        if len(candidate_blocks) > 1:
+            try:
+                repaired = parse_employer_orders_batch(source_text)
+            except Exception:
+                repaired = []
+
+            if len(repaired) > 1:
+                for repaired_item in repaired:
+                    repaired_source = str(
+                        repaired_item.get("original_request")
+                        or repaired_item.get("source_excerpt")
+                        or ""
+                    ).strip()
+                    repaired_item["original_request"] = repaired_source
+                    repaired_item["source_excerpt"] = (
+                        repaired_source[:220] + "…"
+                        if len(repaired_source) > 220
+                        else repaired_source
+                    )
+                    repaired_item["source_text"] = repaired_source
+                    repaired_item["boundary_repaired"] = True
+                    parsed_orders.append(repaired_item)
+                continue
+
         parsed = normalize_parsed_order_from_raw(
             raw=raw,
             original_request="",
             model_used=model_used,
         )
-        parsed["original_request"] = str(raw.get("source_excerpt") or "").strip()
-        parsed["source_excerpt"] = str(raw.get("source_excerpt") or "").strip()
+
+        source_excerpt = str(raw.get("source_excerpt") or "").strip()
+        if not source_excerpt and source_text:
+            source_excerpt = (
+                source_text[:220] + "…"
+                if len(source_text) > 220
+                else source_text
+            )
+
+        parsed["original_request"] = source_text
+        parsed["source_text"] = source_text
+        parsed["source_excerpt"] = source_excerpt
         parsed_orders.append(parsed)
+
+    if len(parsed_orders) > 80:
+        raise RuntimeError("拆单后订单数量异常超过 80 条，请分批处理。")
 
     return parsed_orders, model_used
 
@@ -4384,6 +4443,7 @@ def canonical_order_payload(parsed: Dict[str, Any], index: int) -> Dict[str, Any
     return {
         "Standard Index": index,
         "source_excerpt": parsed.get("source_excerpt") or parsed.get("original_request") or "",
+        "source_text": parsed.get("source_text") or parsed.get("original_request") or "",
         "order_info": parsed.get("order_info", {}),
         "hard_requirements": parsed.get("hard_requirements", {}),
         "preferred_requirements": parsed.get("preferred_requirements", {}),
@@ -4459,8 +4519,16 @@ def parse_standardized_orders_text(standard_text: str) -> List[Dict[str, Any]]:
             model_used="standardized-local",
         )
         source_excerpt = str(raw.get("source_excerpt") or "").strip()
-        parsed["original_request"] = source_excerpt
-        parsed["source_excerpt"] = source_excerpt
+        source_text = str(
+            raw.get("source_text")
+            or source_excerpt
+            or ""
+        ).strip()
+        parsed["original_request"] = source_text
+        parsed["source_text"] = source_text
+        parsed["source_excerpt"] = source_excerpt or (
+            source_text[:220] + "…" if len(source_text) > 220 else source_text
+        )
         parsed_orders.append(parsed)
 
     return parsed_orders
@@ -6122,7 +6190,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">AI Teacher Matching System</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="main-subtitle">V2.4.6：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
+    '<div class="main-subtitle">V2.4.7：电脑 / 手机自适应 → 标准订单 → 老师匹配 → 新老师入库/照片 → 自动读取原始简历 → 生成岗位定制 PDF。</div>',
     unsafe_allow_html=True,
 )
 
@@ -7592,8 +7660,9 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
                 # 后续保存时会分别写入每条 Orders 的 Original Text。
                 source_blocks = [
                     str(
-                        parsed.get("source_excerpt")
+                        parsed.get("source_text")
                         or parsed.get("original_request")
+                        or parsed.get("source_excerpt")
                         or ""
                     ).strip()
                     for parsed in parsed_orders
