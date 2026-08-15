@@ -7569,24 +7569,50 @@ elif mode == "⑥ 招聘信息录入 → 保存到 Orders":
         st.rerun()
 
     if parse_orders_button:
-        if not raw_orders.strip():
-            st.warning("请先粘贴招聘信息。")
-        else:
-            try:
-                with st.spinner("Gemini 正在把不同平台招聘信息统一成标准订单..."):
-                    parsed_orders = parse_employer_orders_batch(raw_orders)
-                    source_blocks = split_batch_orders(raw_orders)
-
-                st.session_state["v24_order_parsed"] = parsed_orders
-                st.session_state["v24_order_source_blocks"] = source_blocks
-                st.success(f"已识别 {len(parsed_orders)} 条标准订单。")
-            except Exception as exc:
-                render_api_error(exc)
-                st.warning(
-                    "Gemini 当前未成功返回。可以先保存原始招聘信息为「待解析」，"
-                    "之后在订单库里重新解析。"
+    if not raw_orders.strip():
+        st.warning("请先粘贴或上传招聘信息。")
+    else:
+        try:
+            with st.spinner(
+                "Gemini 正在识别每一条独立招聘信息并统一订单格式..."
+            ):
+                parsed_orders, model_used = normalize_raw_orders_with_gemini(
+                    raw_orders
                 )
-                st.session_state["v242_gemini_failed_raw"] = raw_orders
+
+            source_blocks = [
+                str(
+                    parsed.get("source_excerpt")
+                    or parsed.get("original_request")
+                    or ""
+                ).strip()
+                for parsed in parsed_orders
+            ]
+
+            st.session_state["v24_order_parsed"] = parsed_orders
+            st.session_state["v24_order_source_blocks"] = source_blocks
+            st.session_state["v24_order_model_used"] = model_used
+
+            st.success(
+                f"✅ 已识别 {len(parsed_orders)} 条独立标准订单。"
+            )
+
+            st.dataframe(
+                standardized_preview_rows(parsed_orders),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            for warning in standardization_quality_warnings(parsed_orders):
+                st.warning(warning)
+
+        except Exception as exc:
+            render_api_error(exc)
+            st.warning(
+                "Gemini 当前未成功返回。原始 OCR / 招聘文字仍保留，"
+                "不会丢失，可以稍后重新点击统一订单格式。"
+            )
+            st.session_state["v242_gemini_failed_raw"] = raw_orders
 
     failed_raw = st.session_state.get("v242_gemini_failed_raw", "")
     if failed_raw:
